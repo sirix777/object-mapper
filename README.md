@@ -22,18 +22,25 @@ use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapper\Runtime\ObjectMapper;
+use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 
 $registry = new MappingRegistry([
     new MappingDefinition(UserResult::class, UserDto::class),
 ]);
 
+$transformers = new ValueTransformerRegistry([
+    new UuidToString(),
+    new DateTimeToAtom(),
+]);
+
 $mapper = new ObjectMapper(
     $registry,
     new MapperCache(
-        new MappingMetadataFactory(),
+        new MappingMetadataFactory($transformers),
         new PhpMapperGenerator(),
         __DIR__ . '/var/cache/object-mapper',
         generateOnDemand: false,
+        valueTransformerRegistry: $transformers,
     ),
 );
 
@@ -61,6 +68,10 @@ $definition = new MappingDefinition(
     rules: [
         'id' => MapRule::from('uuid'),
         'email' => MapRule::fromGetter('getPrimaryEmail'),
+        'externalId' => MapRule::fromMethod('identifier')
+            ->through(UuidToString::class),
+        'createdAt' => MapRule::fromMethod('createdAt')
+            ->through(DateTimeToAtom::class),
     ],
     ignoredSource: ['passwordHash'],
 );
@@ -69,6 +80,20 @@ $definition = new MappingDefinition(
 `MapRule::from()` selects exactly a public, non-static, typed source property;
 it never falls back to a getter. `MapRule::fromGetter()` selects exactly a
 public, non-static, zero-argument `get*()` method with a declared return type.
+`MapRule::fromMethod()` selects a deliberately named public, non-static,
+zero-argument method with a declared return type; it does not extend
+conventional method discovery. `through()` accepts exactly one registered
+transformer class after a source selector. The transformer is checked during
+warmup: its `transform()` method must have one typed required parameter and a
+typed non-void result, and its input/output types must be compatible with the
+source member and target parameter.
+
+Transformer instances belong in one application-owned registry shared by the
+metadata factory and cache. The registry uses exact runtime classes only: it
+does not instantiate classes, resolve services, or consult a framework
+container. Transformations are explicit and type-checked; the mapper never
+performs implicit casts.
+
 The conventional `is*()` lookup remains available only for boolean target
 parameters. Every public source property must be mapped or listed in
 `ignoredSource`; an ignored name must still name an existing public property.
@@ -119,7 +144,20 @@ run repeatedly. Development may set `generateOnDemand: true`; this is a local
 convenience, not a substitute for CI/deployment warmup. Generated files are
 locked, linted, atomically published, checked for safe owner-only permissions,
 and ignored by Git. Do not place the cache in a shared or attacker-writable
-directory.
+directory. Deploy the transformer classes and application wiring first, then
+warm the cache with the same registry that production will use. A transformer
+signature or source-file change intentionally invalidates the generated mapper
+cache; warm again after every such deployment.
+
+## Upgrading to 0.2.0
+
+`MappingMetadataFactory` and `MapperCache` now receive the same
+`ValueTransformerRegistryInterface` instance. Create the registry during
+application wiring and pass it to both construction sites, including tests and
+warmup commands. Existing mappings that do not call `through()` still require
+the constructor migration, but retain their mapping behavior. Register every
+transformer explicitly before warming; there is no implicit class construction,
+service lookup, or container integration.
 
 ## Mapping rules and guarantees
 
@@ -136,11 +174,12 @@ directory.
   selector needed for diagnosis. They do not include mapped values; do not add
   source objects containing sensitive data to application logs.
 
-## Non-goals in 0.1.0
+## Non-goals in 0.2.0
 
 This is not a serializer or a mapper for untrusted HTTP/JSON input. It has no
-automatic casts, transformations, nested/collection traversal, reverse
-mapping, mapping into existing objects, framework/container integration,
-source-side attributes, or custom-mapper service resolution. Attributes and
-transformations are deliberately deferred; use explicit profiles or
-hand-written mappers at trusted boundaries.
+automatic casts, nested/collection traversal, reverse mapping, mapping into
+existing objects, framework/container integration, source-side attributes, or
+custom-mapper service resolution. Transformations are limited to explicitly
+registered, type-checked `through()` rules; they are not a general expression,
+callback, or service-resolution mechanism. Use hand-written mappers for
+policies outside these trusted mapping boundaries.

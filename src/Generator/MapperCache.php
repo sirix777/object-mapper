@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Sirix\ObjectMapper\Generator;
 
 use InvalidArgumentException;
+use Sirix\ObjectMapper\Contract\ValueTransformerRegistryInterface;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
@@ -44,6 +45,7 @@ final class MapperCache
         private readonly MappingMetadataFactory $mappingMetadataFactory,
         private readonly PhpMapperGenerator $phpMapperGenerator,
         private readonly string $cacheDirectory,
+        private readonly ValueTransformerRegistryInterface $valueTransformerRegistry,
         private readonly bool $generateOnDemand = false,
     ) {
         if ('' === $cacheDirectory) {
@@ -201,7 +203,7 @@ final class MapperCache
             throw new MappingCompilationFailed(sprintf('Generated mapper file %s did not define %s.', $path, $className));
         }
 
-        $mapper = new $className();
+        $mapper = new $className($this->valueTransformerRegistry);
         if (! $mapper instanceof GeneratedMapperInterface) {
             throw new MappingCompilationFailed(sprintf('Generated mapper class %s has an invalid type.', $className));
         }

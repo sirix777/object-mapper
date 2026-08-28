@@ -5,7 +5,11 @@ declare(strict_types=1);
 namespace Sirix\ObjectMapper\Definition;
 
 use InvalidArgumentException;
+use ReflectionClass;
+use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
 
+use function class_exists;
+use function is_a;
 use function preg_match;
 use function sprintf;
 use function str_starts_with;
@@ -17,7 +21,14 @@ final readonly class MapRule
 
     private const GETTER = 'getter';
 
-    private function __construct(private string $selector, private string $kind) {}
+    private const METHOD = 'method';
+
+    /** @param null|class-string<ValueTransformerInterface> $transformer */
+    private function __construct(
+        private string $selector,
+        private string $kind,
+        private ?string $transformer = null,
+    ) {}
 
     public static function from(string $property): self
     {
@@ -37,6 +48,39 @@ final readonly class MapRule
         return new self($getter, self::GETTER);
     }
 
+    public static function fromMethod(string $method): self
+    {
+        self::assertIdentifier($method, 'method');
+
+        return new self($method, self::METHOD);
+    }
+
+    /**
+     * @param class-string<ValueTransformerInterface> $transformer
+     *
+     * @phpstan-param string $transformer
+     */
+    public function through(string $transformer): self
+    {
+        if (null !== $this->transformer) {
+            throw new InvalidArgumentException('A mapping rule can have only one transformer.');
+        }
+
+        if (! class_exists($transformer) || ! is_a($transformer, ValueTransformerInterface::class, true)) {
+            throw new InvalidArgumentException(sprintf(
+                'Mapping rule transformer "%s" must be a class implementing %s.',
+                $transformer,
+                ValueTransformerInterface::class,
+            ));
+        }
+
+        if ((new ReflectionClass($transformer))->isAnonymous()) {
+            throw new InvalidArgumentException('Mapping rule transformers must be named classes.');
+        }
+
+        return new self($this->selector, $this->kind, $transformer);
+    }
+
     public function selector(): string
     {
         return $this->selector;
@@ -50,6 +94,22 @@ final readonly class MapRule
     public function selectsGetter(): bool
     {
         return self::GETTER === $this->kind;
+    }
+
+    public function selectsMethod(): bool
+    {
+        return self::METHOD === $this->kind;
+    }
+
+    public function hasTransformer(): bool
+    {
+        return null !== $this->transformer;
+    }
+
+    /** @return null|class-string<ValueTransformerInterface> */
+    public function transformer(): ?string
+    {
+        return $this->transformer;
     }
 
     private static function assertIdentifier(string $identifier, string $kind): void

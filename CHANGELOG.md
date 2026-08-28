@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-28
+
+### Added
+
+- `MapRule::fromMethod()` for deliberate selection of a public, non-static,
+  typed, zero-argument source method without expanding conventional discovery.
+- `MapRule::through()` and the explicit value-transformer contracts and
+  registry for type-checked source-to-target transformations.
+- Generated-mapper cache metadata now includes transformer identity, signature,
+  and source-file state so changed transformers are recompiled on warmup.
+
+### Changed
+
+- `MappingMetadataFactory` and `MapperCache` construction now require the same
+  explicitly assembled transformer registry. Update application wiring, test
+  helpers, and cache-warmup commands accordingly.
+- Deploy transformer code and registry wiring before running warmup; re-warm
+  the owner-only mapper cache after transformer signature or file changes.
+
+### Security
+
+- Transformers are registered by exact class only. The mapper does not perform
+  implicit casts, instantiate transformer classes, or use service/container
+  lookup. Transformer methods and both type-compatibility edges are validated
+  before generated code is loaded.
+
 ## [0.1.0] - 2026-08-28
 
 ### Added

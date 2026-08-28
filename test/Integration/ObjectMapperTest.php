@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapperTest\Integration;
 
+use DateTimeImmutable;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -20,10 +21,14 @@ use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapper\Runtime\ObjectMapper;
+use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
+use Sirix\ObjectMapperTest\Support\DateTimeToAtomTransformer;
 use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
+use Sirix\ObjectMapperTest\Support\ExplicitMethodSource;
+use Sirix\ObjectMapperTest\Support\ExplicitMethodTarget;
 use Sirix\ObjectMapperTest\Support\IdTarget;
 use Sirix\ObjectMapperTest\Support\MissingTarget;
 use Sirix\ObjectMapperTest\Support\NameTarget;
@@ -32,6 +37,9 @@ use Sirix\ObjectMapperTest\Support\ProfileSource;
 use Sirix\ObjectMapperTest\Support\ProfileTarget;
 use Sirix\ObjectMapperTest\Support\RulePrecedenceSource;
 use Sirix\ObjectMapperTest\Support\ThrowingGetterSource;
+use Sirix\ObjectMapperTest\Support\ThrowingTransformer;
+use Sirix\ObjectMapperTest\Support\Uuid;
+use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
 
 use function bin2hex;
 use function chmod;
@@ -190,10 +198,12 @@ final class ObjectMapperTest extends TestCase
 
     public function testItDoesNotReuseAnInMemoryMapperForADifferentProfileOfTheSamePair(): void
     {
-        $mapperCache = new MapperCache(
-            new MappingMetadataFactory(),
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mapperCache              = new MapperCache(
+            new MappingMetadataFactory($valueTransformerRegistry),
             new PhpMapperGenerator(),
             $this->cacheDirectory,
+            $valueTransformerRegistry,
             true,
         );
         $firstProfile = new MappingDefinition(
@@ -266,6 +276,62 @@ final class ObjectMapperTest extends TestCase
         } catch (MappingExecutionFailed $exception) {
             self::assertStringContainsString(ThrowingGetterSource::class . '->' . NameTarget::class, $exception->getMessage());
             self::assertStringNotContainsString('sensitive value', $exception->getMessage());
+            self::assertNull($exception->getPrevious());
+        }
+    }
+
+    public function testItMapsExplicitMethodsThroughRegisteredTransformersAndReloadsWarmCache(): void
+    {
+        $mappingDefinition = new MappingDefinition(
+            ExplicitMethodSource::class,
+            ExplicitMethodTarget::class,
+            [
+                'id'        => MapRule::fromMethod('getIdentifier')->through(UuidToStringTransformer::class),
+                'createdAt' => MapRule::fromMethod('createdAt')->through(DateTimeToAtomTransformer::class),
+                'slug'      => MapRule::fromMethod('slug'),
+            ],
+        );
+        $valueTransformerRegistry = new ValueTransformerRegistry([
+            new UuidToStringTransformer(),
+            new DateTimeToAtomTransformer(),
+        ]);
+
+        $this->mapperWithTransformers(false, $valueTransformerRegistry, $mappingDefinition)->warmup();
+        $explicitMethodTarget = $this->mapperWithTransformers(false, $valueTransformerRegistry, $mappingDefinition)->map(
+            new ExplicitMethodSource(new Uuid('550e8400-e29b-41d4-a716-446655440000'), new DateTimeImmutable('2026-08-28T10:00:00+00:00')),
+            ExplicitMethodTarget::class,
+        );
+
+        self::assertSame('550e8400-e29b-41d4-a716-446655440000', $explicitMethodTarget->id);
+        self::assertSame('2026-08-28T10:00:00+00:00', $explicitMethodTarget->createdAt);
+        self::assertSame('explicit-slug', $explicitMethodTarget->slug);
+    }
+
+    public function testItSanitizesThrownTransformerErrors(): void
+    {
+        $mappingDefinition = new MappingDefinition(
+            ExplicitMethodSource::class,
+            ExplicitMethodTarget::class,
+            [
+                'id'        => MapRule::fromMethod('getIdentifier')->through(ThrowingTransformer::class),
+                'createdAt' => MapRule::fromMethod('createdAt')->through(DateTimeToAtomTransformer::class),
+                'slug'      => MapRule::fromMethod('slug'),
+            ],
+        );
+        $objectMapper = $this->mapperWithTransformers(true, new ValueTransformerRegistry([
+            new ThrowingTransformer(),
+            new DateTimeToAtomTransformer(),
+        ]), $mappingDefinition);
+
+        try {
+            $objectMapper->map(
+                new ExplicitMethodSource(new Uuid('sensitive uuid'), new DateTimeImmutable('2026-08-28T10:00:00+00:00')),
+                ExplicitMethodTarget::class,
+            );
+            self::fail('Expected transformer execution to fail.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertStringContainsString(ExplicitMethodSource::class . '->' . ExplicitMethodTarget::class, $exception->getMessage());
+            self::assertStringNotContainsString('sensitive uuid', $exception->getMessage());
             self::assertNull($exception->getPrevious());
         }
     }
@@ -378,12 +444,32 @@ final class ObjectMapperTest extends TestCase
 
     private function mapper(bool $generateOnDemand, MappingDefinitionInterface ...$definitions): ObjectMapper
     {
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+
         return new ObjectMapper(
             new MappingRegistry($definitions),
             new MapperCache(
-                new MappingMetadataFactory(),
+                new MappingMetadataFactory($valueTransformerRegistry),
                 new PhpMapperGenerator(),
                 $this->cacheDirectory,
+                $valueTransformerRegistry,
+                $generateOnDemand,
+            ),
+        );
+    }
+
+    private function mapperWithTransformers(
+        bool $generateOnDemand,
+        ValueTransformerRegistry $valueTransformerRegistry,
+        MappingDefinitionInterface ...$definitions,
+    ): ObjectMapper {
+        return new ObjectMapper(
+            new MappingRegistry($definitions),
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
                 $generateOnDemand,
             ),
         );

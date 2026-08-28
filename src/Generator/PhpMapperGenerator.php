@@ -15,7 +15,7 @@ use function sprintf;
 /** @internal */
 final class PhpMapperGenerator
 {
-    private const FORMAT_VERSION = '2';
+    private const FORMAT_VERSION = '3';
 
     public function cacheKey(MappingMetadata $mappingMetadata): string
     {
@@ -35,10 +35,19 @@ final class PhpMapperGenerator
                 continue;
             }
 
+            $expression = $parameter->sourceMember->expression('$source');
+            if (null !== $parameter->transformer) {
+                $expression = sprintf(
+                    '$this->transformers->get(\%s::class)->transform(%s)',
+                    ltrim($parameter->transformer->class, '\\'),
+                    $expression,
+                );
+            }
+
             $arguments[] = sprintf(
                 '            %s: %s,',
                 $parameter->name,
-                $parameter->sourceMember->expression('$source'),
+                $expression,
             );
         }
 
@@ -51,6 +60,9 @@ final class PhpMapperGenerator
             . "namespace Sirix\\ObjectMapper\\Generated;\n\n"
             . "final class {$class} implements \\Sirix\\ObjectMapper\\Generator\\GeneratedMapperInterface\n"
             . "{\n"
+            . "    public function __construct(\n"
+            . "        private \\Sirix\\ObjectMapper\\Contract\\ValueTransformerRegistryInterface \$transformers,\n"
+            . "    ) {}\n\n"
             . "    public function map(object \$source): object\n"
             . "    {\n"
             . "        if (!\$source instanceof {$source}) {\n"
@@ -68,20 +80,33 @@ final class PhpMapperGenerator
     {
         $parameters = [];
         foreach ($mappingMetadata->parameters as $parameter) {
+            $typeExporter = new ReflectionTypeExporter();
             $parameters[] = [
-                'name'       => $parameter->name,
-                'hasDefault' => $parameter->hasDefault,
-                'type'       => null === $parameter->type
+                'name'        => $parameter->name,
+                'hasDefault'  => $parameter->hasDefault,
+                'type'        => null === $parameter->type
                     ? null
-                    : (new ReflectionTypeExporter())->export($parameter->type, $parameter->declaringClass),
-                'source'     => null === $parameter->sourceMember ? null : [
+                    : $typeExporter->export($parameter->type, $parameter->declaringClass),
+                'source'      => null === $parameter->sourceMember ? null : [
                     'kind'      => $parameter->sourceMember->kind,
                     'name'      => $parameter->sourceMember->name,
                     'selection' => $parameter->sourceMember->selection,
-                    'type'      => (new ReflectionTypeExporter())->export(
+                    'type'      => $typeExporter->export(
                         $parameter->sourceMember->type,
                         $parameter->sourceMember->declaringClass,
                     ),
+                ],
+                'transformer' => null === $parameter->transformer ? null : [
+                    'class'         => $parameter->transformer->class,
+                    'inputType'     => $typeExporter->export(
+                        $parameter->transformer->inputType,
+                        $parameter->transformer->inputDeclaringClass,
+                    ),
+                    'outputType'    => $typeExporter->export(
+                        $parameter->transformer->outputType,
+                        $parameter->transformer->outputDeclaringClass,
+                    ),
+                    'classFileHash' => $parameter->transformer->fileHash,
                 ],
             ];
         }

@@ -17,5 +17,6 @@ final readonly class TargetParameter
         public bool $hasDefault,
         public ?ReflectionType $type,
         public ReflectionClass $declaringClass,
+        public ?TransformerMetadata $transformer = null,
     ) {}
 }

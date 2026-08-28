@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapperTest\Support;
 
+use DateTimeInterface;
+use LogicException;
+use RuntimeException;
+use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
 
 final readonly class ConventionalSource
@@ -189,3 +193,241 @@ final class VariadicProfileTarget
 }
 
 abstract class AbstractFixture {}
+
+final readonly class Uuid
+{
+    public function __construct(private string $value) {}
+
+    public function toString(): string
+    {
+        return $this->value;
+    }
+}
+
+class UuidToStringTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid $uuid): string
+    {
+        return $uuid->toString();
+    }
+}
+
+final class AlternativeUuidToStringTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid $uuid): string
+    {
+        return $uuid->toString();
+    }
+}
+
+final class UuidToStringTransformerChild extends UuidToStringTransformer {}
+
+final class DateTimeToAtomTransformer implements ValueTransformerInterface
+{
+    public function transform(DateTimeInterface $value): string
+    {
+        return $value->format(DATE_ATOM);
+    }
+}
+
+final class InheritedDateTimeTransformer extends ExternalTransformingParent {}
+
+final class IncompatibleTransformer implements ValueTransformerInterface
+{
+    public function transform(int $value): string
+    {
+        return (string) $value;
+    }
+}
+
+final class NullableInputTransformer implements ValueTransformerInterface
+{
+    public function transform(?Uuid $uuid): string
+    {
+        return $uuid?->toString() ?? 'none';
+    }
+}
+
+final class NullableOutputTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid $uuid): ?string
+    {
+        $string = $uuid->toString();
+
+        return '' === $string ? null : $string;
+    }
+}
+
+final class ThrowingTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid $uuid): string
+    {
+        throw new RuntimeException('sensitive transformer value: ' . $uuid->toString());
+    }
+}
+
+final class PrivateTransformTransformer implements ValueTransformerInterface
+{
+    public function invokeForFixture(Uuid $uuid): string
+    {
+        return $this->transform($uuid);
+    }
+
+    private function transform(Uuid $uuid): string
+    {
+        return $uuid->toString();
+    }
+}
+
+final class StaticTransformTransformer implements ValueTransformerInterface
+{
+    public static function transform(Uuid $uuid): string
+    {
+        return $uuid->toString();
+    }
+}
+
+final class VariadicTransformTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid ...$value): string
+    {
+        return $value[0]->toString();
+    }
+}
+
+final class ZeroArgumentTransformTransformer implements ValueTransformerInterface
+{
+    public function transform(): string
+    {
+        return 'value';
+    }
+}
+
+final class MultipleArgumentTransformTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid $uuid, string $prefix): string
+    {
+        return $prefix . $uuid->toString();
+    }
+}
+
+final class ByReferenceTransformTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid &$uuid): string
+    {
+        return $uuid->toString();
+    }
+}
+
+final class UntypedParameterTransformTransformer implements ValueTransformerInterface
+{
+    /** @param mixed $value */
+    public function transform($value): string
+    {
+        return (string) $value;
+    }
+}
+
+final class UntypedReturnTransformTransformer implements ValueTransformerInterface
+{
+    /** @return string */
+    public function transform(Uuid $uuid)
+    {
+        return $uuid->toString();
+    }
+}
+
+final class VoidTransformTransformer implements ValueTransformerInterface
+{
+    public static ?Uuid $last = null;
+
+    public function transform(Uuid $uuid): void
+    {
+        self::$last = $uuid;
+    }
+}
+
+final class NeverTransformTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid $uuid): never
+    {
+        throw new LogicException();
+    }
+}
+
+final class MixedOutputTransformer implements ValueTransformerInterface
+{
+    public function transform(Uuid $uuid): mixed
+    {
+        return $uuid->toString();
+    }
+}
+
+final readonly class ExplicitMethodSource
+{
+    public function __construct(private Uuid $uuid, private DateTimeInterface $createdAt) {}
+
+    public function getIdentifier(): Uuid
+    {
+        return $this->uuid;
+    }
+
+    public function createdAt(): DateTimeInterface
+    {
+        return $this->createdAt;
+    }
+
+    public function slug(): string
+    {
+        return 'explicit-slug';
+    }
+}
+
+final readonly class ExplicitMethodTarget
+{
+    public function __construct(public string $id, public string $createdAt, public string $slug) {}
+}
+
+final class InvalidMethodSource
+{
+    public static function staticMethod(): string
+    {
+        return 'static';
+    }
+
+    public function argumentful(string $value): string
+    {
+        return $value;
+    }
+
+    /** @return string */
+    public function untyped()
+    {
+        return 'untyped';
+    }
+
+    public function invokeHiddenForFixture(): string
+    {
+        return $this->hidden();
+    }
+
+    private function hidden(): string
+    {
+        return 'hidden';
+    }
+}
+
+final readonly class NullableUuidMethodSource
+{
+    public function __construct(private ?Uuid $uuid) {}
+
+    public function nullableIdentifier(): ?Uuid
+    {
+        return $this->uuid;
+    }
+}
+
+final readonly class UuidTarget
+{
+    public function __construct(public Uuid $id) {}
+}

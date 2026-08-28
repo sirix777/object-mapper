@@ -7,15 +7,19 @@ namespace Sirix\ObjectMapper\Metadata;
 use LogicException;
 use ReflectionClass;
 use ReflectionIntersectionType;
+use ReflectionMethod;
 use ReflectionNamedType;
 use ReflectionParameter;
 use ReflectionProperty;
 use ReflectionType;
 use ReflectionUnionType;
+use Sirix\ObjectMapper\Contract\ValueTransformerRegistryInterface;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
 
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
+use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
+use Throwable;
 
 use function array_push;
 use function hash_file;
@@ -27,7 +31,10 @@ use function ucfirst;
 /** @internal */
 final readonly class MappingMetadataFactory
 {
-    public function __construct(private TypeCompatibilityChecker $typeCompatibilityChecker = new TypeCompatibilityChecker()) {}
+    public function __construct(
+        private ValueTransformerRegistryInterface $valueTransformerRegistry = new ValueTransformerRegistry(),
+        private TypeCompatibilityChecker $typeCompatibilityChecker = new TypeCompatibilityChecker(),
+    ) {}
 
     public function create(MappingDefinition $mappingDefinition): MappingMetadata
     {
@@ -97,24 +104,20 @@ final readonly class MappingMetadataFactory
                 ));
             }
 
-            if (! $this->typeCompatibilityChecker->isCompatible(
-                $sourceMember->type,
-                $sourceMember->declaringClass,
+            $transformerMetadata = $mapRule instanceof MapRule && $mapRule->hasTransformer()
+                ? $this->resolveTransformer($source, $target, $reflectionParameter, $mapRule)
+                : null;
+
+            $this->assertTypesAreCompatible(
+                $source,
+                $target,
+                $reflectionParameter,
+                $mapRule,
+                $sourceMember,
                 $parameterType,
                 $constructor->getDeclaringClass(),
-            )) {
-                throw new MappingCompilationFailed($this->message(
-                    $source,
-                    $target,
-                    $reflectionParameter->getName(),
-                    sprintf(
-                        '%sSource type %s is not assignable to target type %s.',
-                        $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
-                        $this->typeCompatibilityChecker->describe($sourceMember->type, $sourceMember->declaringClass),
-                        $this->typeCompatibilityChecker->describe($parameterType, $constructor->getDeclaringClass()),
-                    ),
-                ));
-            }
+                $transformerMetadata,
+            );
 
             $parameters[] = new TargetParameter(
                 $reflectionParameter->getName(),
@@ -122,6 +125,7 @@ final readonly class MappingMetadataFactory
                 $reflectionParameter->isDefaultValueAvailable(),
                 $parameterType,
                 $constructor->getDeclaringClass(),
+                $transformerMetadata,
             );
         }
 
@@ -230,12 +234,28 @@ final readonly class MappingMetadataFactory
             return new SourceMember($selector, 'property', $property->getType(), $property->getDeclaringClass(), 'property_rule');
         }
 
+        return $this->resolveSelectedMethod($source, $target, $reflectionParameter, $mapRule);
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     */
+    private function resolveSelectedMethod(
+        ReflectionClass $source,
+        ReflectionClass $target,
+        ReflectionParameter $reflectionParameter,
+        MapRule $mapRule,
+    ): SourceMember {
+        $selector = $mapRule->selector();
+        $kind     = $mapRule->selectsGetter() ? 'getter' : 'method';
+
         if (! $source->hasMethod($selector)) {
             throw new MappingCompilationFailed($this->message(
                 $source,
                 $target,
                 $reflectionParameter->getName(),
-                sprintf('Configured getter selector %s() does not exist.', $selector),
+                sprintf('Configured %s selector %s() does not exist.', $kind, $selector),
             ));
         }
 
@@ -245,7 +265,7 @@ final readonly class MappingMetadataFactory
                 $source,
                 $target,
                 $reflectionParameter->getName(),
-                sprintf('Configured getter selector %s() must select a public, non-static, zero-argument method with a declared return type.', $selector),
+                sprintf('Configured %s selector %s() must select a public, non-static, zero-argument method with a declared return type.', $kind, $selector),
             ));
         }
 
@@ -254,8 +274,171 @@ final readonly class MappingMetadataFactory
             'method',
             $reflectionMethod->getReturnType(),
             $this->sourceMemberContext($reflectionMethod->getReturnType(), $reflectionMethod->getDeclaringClass(), $source),
-            'getter_rule',
+            $mapRule->selectsGetter() ? 'getter_rule' : 'method_rule',
         );
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     */
+    private function resolveTransformer(
+        ReflectionClass $source,
+        ReflectionClass $target,
+        ReflectionParameter $reflectionParameter,
+        MapRule $mapRule,
+    ): TransformerMetadata {
+        $transformerClass = $mapRule->transformer();
+        if (null === $transformerClass) {
+            throw new LogicException('A transformer rule must provide a transformer class.');
+        }
+
+        try {
+            $transformer = $this->valueTransformerRegistry->get($transformerClass);
+        } catch (Throwable) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf('Configured transformer %s is not registered.', $transformerClass),
+            ));
+        }
+
+        if ($transformer::class !== $transformerClass) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf('Configured transformer %s resolved to the wrong class.', $transformerClass),
+            ));
+        }
+
+        $reflectionClass = $this->reflectObject($transformerClass);
+        if (! $reflectionClass->hasMethod('transform')) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf('Configured transformer %s must define transform().', $transformerClass),
+            ));
+        }
+
+        $reflectionMethod     = $reflectionClass->getMethod('transform');
+        $parameters           = $reflectionMethod->getParameters();
+        $parameter            = $parameters[0] ?? null;
+        $returnType           = $reflectionMethod->getReturnType();
+        if (! $this->isValidTransformerMethod($reflectionMethod)
+            || null === $parameter
+            || $parameter->isPassedByReference()
+            || ! $parameter->getType() instanceof ReflectionType
+            || ! $returnType instanceof ReflectionType) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf('Configured transformer %s must expose a public, non-static, non-variadic transform() method with exactly one required typed by-value parameter and a typed non-void, non-never return.', $transformerClass),
+            ));
+        }
+
+        return new TransformerMetadata(
+            $transformerClass,
+            $parameter->getType(),
+            $this->sourceMemberContext($parameter->getType(), $reflectionMethod->getDeclaringClass(), $reflectionClass),
+            $returnType,
+            $this->sourceMemberContext($returnType, $reflectionMethod->getDeclaringClass(), $reflectionClass),
+            $this->hashFile($reflectionMethod->getFileName()),
+        );
+    }
+
+    private function isValidTransformerMethod(ReflectionMethod $reflectionMethod): bool
+    {
+        $returnType = $reflectionMethod->getReturnType();
+
+        return $reflectionMethod->isPublic()
+            && ! $reflectionMethod->isStatic()
+            && ! $reflectionMethod->isVariadic()
+            && 1 === $reflectionMethod->getNumberOfParameters()
+            && 1 === $reflectionMethod->getNumberOfRequiredParameters()
+            && $returnType instanceof ReflectionType
+            && (! $returnType instanceof ReflectionNamedType || ! in_array($returnType->getName(), ['void', 'never'], true));
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     * @param ReflectionClass<object> $targetContext
+     */
+    private function assertTypesAreCompatible(
+        ReflectionClass $source,
+        ReflectionClass $target,
+        ReflectionParameter $reflectionParameter,
+        ?MapRule $mapRule,
+        SourceMember $sourceMember,
+        ReflectionType $reflectionType,
+        ReflectionClass $targetContext,
+        ?TransformerMetadata $transformerMetadata,
+    ): void {
+        if (! $transformerMetadata instanceof TransformerMetadata) {
+            if (! $this->typeCompatibilityChecker->isCompatible(
+                $sourceMember->type,
+                $sourceMember->declaringClass,
+                $reflectionType,
+                $targetContext,
+            )) {
+                throw new MappingCompilationFailed($this->message(
+                    $source,
+                    $target,
+                    $reflectionParameter->getName(),
+                    sprintf(
+                        '%sSource type %s is not assignable to target type %s.',
+                        $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
+                        $this->typeCompatibilityChecker->describe($sourceMember->type, $sourceMember->declaringClass),
+                        $this->typeCompatibilityChecker->describe($reflectionType, $targetContext),
+                    ),
+                ));
+            }
+
+            return;
+        }
+
+        if (! $this->typeCompatibilityChecker->isCompatible(
+            $sourceMember->type,
+            $sourceMember->declaringClass,
+            $transformerMetadata->inputType,
+            $transformerMetadata->inputDeclaringClass,
+        )) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf(
+                    'Configured selector %s and transformer %s are incompatible: source type %s is not assignable to transformer input type %s.',
+                    $mapRule instanceof MapRule ? $this->describeRule($mapRule) : 'convention',
+                    $transformerMetadata->class,
+                    $this->typeCompatibilityChecker->describe($sourceMember->type, $sourceMember->declaringClass),
+                    $this->typeCompatibilityChecker->describe($transformerMetadata->inputType, $transformerMetadata->inputDeclaringClass),
+                ),
+            ));
+        }
+
+        if (! $this->typeCompatibilityChecker->isCompatible(
+            $transformerMetadata->outputType,
+            $transformerMetadata->outputDeclaringClass,
+            $reflectionType,
+            $targetContext,
+        )) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf(
+                    'Configured transformer %s output type %s is not assignable to target type %s.',
+                    $transformerMetadata->class,
+                    $this->typeCompatibilityChecker->describe($transformerMetadata->outputType, $transformerMetadata->outputDeclaringClass),
+                    $this->typeCompatibilityChecker->describe($reflectionType, $targetContext),
+                ),
+            ));
+        }
     }
 
     private function isBooleanParameter(ReflectionParameter $reflectionParameter): bool
@@ -296,7 +479,11 @@ final readonly class MappingMetadataFactory
     /** @param ReflectionClass<object> $reflectionClass */
     private function fileHash(ReflectionClass $reflectionClass): ?string
     {
-        $file = $reflectionClass->getFileName();
+        return $this->hashFile($reflectionClass->getFileName());
+    }
+
+    private function hashFile(false|string $file): ?string
+    {
         if (false === $file || ! is_file($file)) {
             return null;
         }
@@ -416,6 +603,16 @@ final readonly class MappingMetadataFactory
         ReflectionClass $source,
     ): ReflectionClass {
         return $this->usesStaticType($reflectionType) ? $source : $declaringClass;
+    }
+
+    /**
+     * @param class-string<object> $class
+     *
+     * @return ReflectionClass<object>
+     */
+    private function reflectObject(string $class): ReflectionClass
+    {
+        return new ReflectionClass($class);
     }
 
     private function usesStaticType(ReflectionType $reflectionType): bool
