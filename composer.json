@@ -1,0 +1,52 @@
+{
+    "name": "sirix/object-mapper",
+    "description": "Framework-neutral object-to-object mapper with generated PHP mappers.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "~8.2.0 || ~8.3.0 || ~8.4.0 || ~8.5.0"
+    },
+    "require-dev": {
+        "bamarni/composer-bin-plugin": "^1.8",
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Sirix\\ObjectMapper\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Sirix\\ObjectMapperTest\\": "test/"
+        }
+    },
+    "scripts": {
+        "test": "php vendor/bin/phpunit --colors=always --testdox",
+        "analyse-deps": "tools/composer-dependency-analyser/vendor/bin/composer-dependency-analyser",
+        "cs-check": "php tools/php-cs-fixer/vendor/bin/php-cs-fixer fix --dry-run -vvv --diff",
+        "cs-fix": "php tools/php-cs-fixer/vendor/bin/php-cs-fixer fix -vvv",
+        "normalize": "@composer bin composer-normalize normalize --diff ../../composer.json",
+        "phpstan": "php tools/phpstan/vendor/bin/phpstan analyse -c phpstan.neon --memory-limit=2G",
+        "rector": "php tools/rector/vendor/bin/rector process --dry-run --memory-limit=2G",
+        "rector-fix": "php tools/rector/vendor/bin/rector process --memory-limit=2G",
+        "check": [
+            "@cs-check",
+            "@rector",
+            "@phpstan",
+            "@test"
+        ]
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "bamarni/composer-bin-plugin": true
+        }
+    },
+    "extra": {
+        "bamarni-bin": {
+            "bin-links": false,
+            "forward-command": true,
+            "target-directory": "tools"
+        }
+    }
+}

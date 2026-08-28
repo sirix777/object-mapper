@@ -1,0 +1,7 @@
+/vendor/
+/coverage/
+/data/cache/.php-cs-fixer.cache
+/data/cache/.phpunit.cache
+/data/cache/object-mapper/*
+!/data/cache/object-mapper/.gitkeep
+.idea
