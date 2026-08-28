@@ -40,9 +40,6 @@ final class MapperCache
     /** @var array<string, GeneratedMapperInterface> */
     private array $mappers = [];
 
-    /** @var array<string, GeneratedMapperInterface> */
-    private array $mappersByDefinition = [];
-
     public function __construct(
         private readonly MappingMetadataFactory $mappingMetadataFactory,
         private readonly PhpMapperGenerator $phpMapperGenerator,
@@ -66,11 +63,6 @@ final class MapperCache
 
     private function resolve(MappingDefinition $mappingDefinition, bool $allowGeneration): GeneratedMapperInterface
     {
-        $definitionKey = $mappingDefinition->key();
-        if (isset($this->mappersByDefinition[$definitionKey])) {
-            return $this->mappersByDefinition[$definitionKey];
-        }
-
         $mappingMetadata = $this->mappingMetadataFactory->create($mappingDefinition);
         $key             = $this->phpMapperGenerator->cacheKey($mappingMetadata);
         if (isset($this->mappers[$key])) {
@@ -110,7 +102,6 @@ final class MapperCache
 
             if (is_file($path)) {
                 return $this->remember(
-                    $definitionKey,
                     $key,
                     $this->load($path, $className, $content),
                 );
@@ -128,7 +119,6 @@ final class MapperCache
             }
 
             return $this->remember(
-                $definitionKey,
                 $key,
                 $this->load($path, $className, $content),
             );
@@ -170,12 +160,10 @@ final class MapperCache
     }
 
     private function remember(
-        string $definitionKey,
         string $cacheKey,
         GeneratedMapperInterface $generatedMapper,
     ): GeneratedMapperInterface {
-        $this->mappers[$cacheKey]                  = $generatedMapper;
-        $this->mappersByDefinition[$definitionKey] = $generatedMapper;
+        $this->mappers[$cacheKey] = $generatedMapper;
 
         return $generatedMapper;
     }

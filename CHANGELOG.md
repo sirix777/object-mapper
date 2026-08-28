@@ -8,6 +8,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- External conventional mapping profiles with explicit property/getter rename
+  rules and checked ignored public source fields.
+- `CustomMappingDefinition` and `CustomObjectMapperInterface` for
+  application-owned hand-written mappers with exact-pair and target-type
+  guarantees.
+- Profile-aware generated-mapper cache identity and custom-mapper-safe warmup.
 - Explicit mapping definitions and a registry for exact concrete class pairs.
 - Strict reflection metadata validation for public properties and safe getters.
 - Type compatibility checks covering nullability, unions, intersections,

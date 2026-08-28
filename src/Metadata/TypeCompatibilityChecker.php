@@ -109,9 +109,9 @@ final class TypeCompatibilityChecker
     private function resolveName(string $name, ReflectionClass $reflectionClass): string
     {
         return match ($name) {
-            'self'   => $reflectionClass->getName(),
-            'parent' => $this->parentName($reflectionClass),
+            'self',
             'static' => $reflectionClass->getName(),
+            'parent' => $this->parentName($reflectionClass),
             default  => $name,
         };
     }

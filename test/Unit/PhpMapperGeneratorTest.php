@@ -7,12 +7,15 @@ namespace Sirix\ObjectMapperTest\Unit;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
+use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
 use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
+use Sirix\ObjectMapperTest\Support\ProfileTarget;
+use Sirix\ObjectMapperTest\Support\RulePrecedenceSource;
 
 #[CoversClass(PhpMapperGenerator::class)]
 final class PhpMapperGeneratorTest extends TestCase
@@ -37,6 +40,36 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertNotSame(
             $phpMapperGenerator->cacheKey($mappingMetadataFactory->create(new MappingDefinition(ConventionalSource::class, ConventionalTarget::class))),
             $phpMapperGenerator->cacheKey($mappingMetadataFactory->create(new MappingDefinition(DefaultSource::class, DefaultTarget::class))),
+        );
+    }
+
+    public function testItsCacheKeyChangesWhenTheProfileChangesForTheSamePair(): void
+    {
+        $mappingMetadataFactory = new MappingMetadataFactory();
+        $phpMapperGenerator     = new PhpMapperGenerator();
+
+        $propertyAndGetterProfile = new MappingDefinition(
+            RulePrecedenceSource::class,
+            ProfileTarget::class,
+            [
+                'id'    => MapRule::from('uuid'),
+                'email' => MapRule::fromGetter('getPrimaryEmail'),
+            ],
+            ['id'],
+        );
+        $conventionalProfile = new MappingDefinition(
+            RulePrecedenceSource::class,
+            ProfileTarget::class,
+            [
+                'id'    => MapRule::from('id'),
+                'email' => MapRule::fromGetter('getEmail'),
+            ],
+            ['uuid'],
+        );
+
+        self::assertNotSame(
+            $phpMapperGenerator->cacheKey($mappingMetadataFactory->create($propertyAndGetterProfile)),
+            $phpMapperGenerator->cacheKey($mappingMetadataFactory->create($conventionalProfile)),
         );
     }
 }

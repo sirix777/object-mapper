@@ -17,6 +17,7 @@ final readonly class SourceMember
         public string $kind,
         public ReflectionType $type,
         public ReflectionClass $declaringClass,
+        public string $selection = 'convention',
     ) {}
 
     public function expression(string $sourceVariable): string

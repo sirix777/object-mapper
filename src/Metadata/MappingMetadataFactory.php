@@ -13,6 +13,7 @@ use ReflectionProperty;
 use ReflectionType;
 use ReflectionUnionType;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
+use Sirix\ObjectMapper\Definition\MapRule;
 
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 
@@ -41,18 +42,26 @@ final readonly class MappingMetadataFactory
             ));
         }
 
+        $this->assertAllRulesTargetParameters($source, $target, $mappingDefinition->rules, $constructor->getParameters());
+        $this->assertIgnoredSourceProperties($source, $target, $mappingDefinition->ignoredSource);
+
         $parameters = [];
+        $rules      = $mappingDefinition->rules;
         foreach ($constructor->getParameters() as $reflectionParameter) {
+            $mapRule = $rules[$reflectionParameter->getName()] ?? null;
             if ($reflectionParameter->isVariadic()) {
                 throw new MappingCompilationFailed($this->message(
                     $source,
                     $target,
                     $reflectionParameter->getName(),
-                    'Variadic target parameters are not supported.',
+                    sprintf(
+                        '%sVariadic target parameters are not supported.',
+                        $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
+                    ),
                 ));
             }
 
-            $sourceMember  = $this->findSourceMember($source, $reflectionParameter);
+            $sourceMember  = $this->findSourceMember($source, $target, $reflectionParameter, $mapRule);
             $parameterType = $reflectionParameter->getType();
 
             if (! $sourceMember instanceof SourceMember) {
@@ -81,7 +90,10 @@ final readonly class MappingMetadataFactory
                     $source,
                     $target,
                     $reflectionParameter->getName(),
-                    'Target parameter has no declared type.',
+                    sprintf(
+                        '%sTarget parameter has no declared type.',
+                        $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
+                    ),
                 ));
             }
 
@@ -96,7 +108,8 @@ final readonly class MappingMetadataFactory
                     $target,
                     $reflectionParameter->getName(),
                     sprintf(
-                        'Source type %s is not assignable to target type %s.',
+                        '%sSource type %s is not assignable to target type %s.',
+                        $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
                         $this->typeCompatibilityChecker->describe($sourceMember->type, $sourceMember->declaringClass),
                         $this->typeCompatibilityChecker->describe($parameterType, $constructor->getDeclaringClass()),
                     ),
@@ -112,7 +125,7 @@ final readonly class MappingMetadataFactory
             );
         }
 
-        $this->assertNoUnmappedPublicSourceProperties($source, $target, $parameters);
+        $this->assertNoUnmappedPublicSourceProperties($source, $target, $parameters, $mappingDefinition->ignoredSource);
 
         return new MappingMetadata(
             $source->getName(),
@@ -123,9 +136,20 @@ final readonly class MappingMetadataFactory
         );
     }
 
-    /** @param ReflectionClass<object> $reflectionClass */
-    private function findSourceMember(ReflectionClass $reflectionClass, ReflectionParameter $reflectionParameter): ?SourceMember
-    {
+    /**
+     * @param ReflectionClass<object> $reflectionClass
+     * @param ReflectionClass<object> $target
+     */
+    private function findSourceMember(
+        ReflectionClass $reflectionClass,
+        ReflectionClass $target,
+        ReflectionParameter $reflectionParameter,
+        ?MapRule $mapRule,
+    ): ?SourceMember {
+        if ($mapRule instanceof MapRule) {
+            return $this->resolveRule($reflectionClass, $target, $reflectionParameter, $mapRule);
+        }
+
         $name = $reflectionParameter->getName();
 
         if ($reflectionClass->hasProperty($name)) {
@@ -169,6 +193,69 @@ final readonly class MappingMetadataFactory
         }
 
         return null;
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     */
+    private function resolveRule(
+        ReflectionClass $source,
+        ReflectionClass $target,
+        ReflectionParameter $reflectionParameter,
+        MapRule $mapRule,
+    ): SourceMember {
+        $selector = $mapRule->selector();
+
+        if ($mapRule->selectsProperty()) {
+            if (! $source->hasProperty($selector)) {
+                throw new MappingCompilationFailed($this->message(
+                    $source,
+                    $target,
+                    $reflectionParameter->getName(),
+                    sprintf('Configured property selector $%s does not exist.', $selector),
+                ));
+            }
+
+            $property = $source->getProperty($selector);
+            if (! $property->isPublic() || $property->isStatic() || ! $property->getType() instanceof ReflectionType) {
+                throw new MappingCompilationFailed($this->message(
+                    $source,
+                    $target,
+                    $reflectionParameter->getName(),
+                    sprintf('Configured property selector $%s must select a public, non-static, typed source property.', $selector),
+                ));
+            }
+
+            return new SourceMember($selector, 'property', $property->getType(), $property->getDeclaringClass(), 'property_rule');
+        }
+
+        if (! $source->hasMethod($selector)) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf('Configured getter selector %s() does not exist.', $selector),
+            ));
+        }
+
+        $reflectionMethod = $source->getMethod($selector);
+        if (! $reflectionMethod->isPublic() || $reflectionMethod->isStatic() || 0 !== $reflectionMethod->getNumberOfParameters() || ! $reflectionMethod->getReturnType() instanceof ReflectionType) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf('Configured getter selector %s() must select a public, non-static, zero-argument method with a declared return type.', $selector),
+            ));
+        }
+
+        return new SourceMember(
+            $selector,
+            'method',
+            $reflectionMethod->getReturnType(),
+            $this->sourceMemberContext($reflectionMethod->getReturnType(), $reflectionMethod->getDeclaringClass(), $source),
+            'getter_rule',
+        );
     }
 
     private function isBooleanParameter(ReflectionParameter $reflectionParameter): bool
@@ -226,11 +313,13 @@ final readonly class MappingMetadataFactory
      * @param ReflectionClass<object> $source
      * @param ReflectionClass<object> $target
      * @param list<TargetParameter>   $parameters
+     * @param list<string>            $ignoredSource
      */
     private function assertNoUnmappedPublicSourceProperties(
         ReflectionClass $source,
         ReflectionClass $target,
         array $parameters,
+        array $ignoredSource,
     ): void {
         $mappedProperties = [];
         foreach ($parameters as $parameter) {
@@ -240,12 +329,76 @@ final readonly class MappingMetadataFactory
         }
 
         foreach ($source->getProperties(ReflectionProperty::IS_PUBLIC) as $reflectionProperty) {
-            if (! $reflectionProperty->isStatic() && ! isset($mappedProperties[$reflectionProperty->getName()])) {
+            if (! $reflectionProperty->isStatic()
+                && ! isset($mappedProperties[$reflectionProperty->getName()])
+                && ! in_array($reflectionProperty->getName(), $ignoredSource, true)) {
                 throw new MappingCompilationFailed(sprintf(
                     'Cannot compile mapping %s -> %s: public source property $%s is not mapped.',
                     $source->getName(),
                     $target->getName(),
                     $reflectionProperty->getName(),
+                ));
+            }
+        }
+    }
+
+    /**
+     * @param ReflectionClass<object>   $source
+     * @param ReflectionClass<object>   $target
+     * @param array<string, MapRule>    $rules
+     * @param list<ReflectionParameter> $parameters
+     */
+    private function assertAllRulesTargetParameters(ReflectionClass $source, ReflectionClass $target, array $rules, array $parameters): void
+    {
+        $parameterNames = [];
+        foreach ($parameters as $parameter) {
+            $parameterNames[$parameter->name] = true;
+        }
+
+        foreach ($rules as $parameter => $mapRule) {
+            if (! isset($parameterNames[$parameter])) {
+                throw new MappingCompilationFailed($this->message(
+                    $source,
+                    $target,
+                    $parameter,
+                    sprintf(
+                        'Configured selector %s does not refer to a target constructor parameter.',
+                        $this->describeRule($mapRule),
+                    ),
+                ));
+            }
+        }
+    }
+
+    private function describeRule(MapRule $mapRule): string
+    {
+        return $mapRule->selectsProperty() ? '$' . $mapRule->selector() : $mapRule->selector() . '()';
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     * @param list<string>            $ignoredSource
+     */
+    private function assertIgnoredSourceProperties(ReflectionClass $source, ReflectionClass $target, array $ignoredSource): void
+    {
+        foreach ($ignoredSource as $propertyName) {
+            if (! $source->hasProperty($propertyName)) {
+                throw new MappingCompilationFailed(sprintf(
+                    'Cannot compile mapping %s -> %s: ignored source property $%s does not exist.',
+                    $source->getName(),
+                    $target->getName(),
+                    $propertyName,
+                ));
+            }
+
+            $property = $source->getProperty($propertyName);
+            if (! $property->isPublic() || $property->isStatic()) {
+                throw new MappingCompilationFailed(sprintf(
+                    'Cannot compile mapping %s -> %s: ignored source property $%s must be public and non-static.',
+                    $source->getName(),
+                    $target->getName(),
+                    $propertyName,
                 ));
             }
         }

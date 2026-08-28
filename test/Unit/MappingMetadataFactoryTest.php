@@ -7,6 +7,7 @@ namespace Sirix\ObjectMapperTest\Unit;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
+use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
@@ -20,7 +21,9 @@ use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
 use Sirix\ObjectMapperTest\Support\GetterSource;
 use Sirix\ObjectMapperTest\Support\IdTarget;
+use Sirix\ObjectMapperTest\Support\IncompatibleProfileSource;
 use Sirix\ObjectMapperTest\Support\InheritedSource;
+use Sirix\ObjectMapperTest\Support\InvalidProfileSource;
 use Sirix\ObjectMapperTest\Support\MissingTarget;
 use Sirix\ObjectMapperTest\Support\MixedSource;
 use Sirix\ObjectMapperTest\Support\NameTarget;
@@ -28,9 +31,13 @@ use Sirix\ObjectMapperTest\Support\NonNullableNameTarget;
 use Sirix\ObjectMapperTest\Support\NullableSource;
 use Sirix\ObjectMapperTest\Support\ParentTarget;
 use Sirix\ObjectMapperTest\Support\PrivateSource;
+use Sirix\ObjectMapperTest\Support\ProfileSource;
+use Sirix\ObjectMapperTest\Support\ProfileTarget;
+use Sirix\ObjectMapperTest\Support\RulePrecedenceSource;
 use Sirix\ObjectMapperTest\Support\StaticGetterSource;
 use Sirix\ObjectMapperTest\Support\StaticGetterTarget;
 use Sirix\ObjectMapperTest\Support\StringTarget;
+use Sirix\ObjectMapperTest\Support\VariadicProfileTarget;
 
 use function array_map;
 
@@ -108,6 +115,124 @@ final class MappingMetadataFactoryTest extends TestCase
         self::assertSame('getValue', $metadata->parameters[0]->sourceMember?->name);
     }
 
+    public function testItResolvesExplicitPropertyAndGetterRulesBeforeConvention(): void
+    {
+        $mappingMetadata = $this->mappingMetadataFactory->create(new MappingDefinition(
+            ProfileSource::class,
+            ProfileTarget::class,
+            [
+                'id'    => MapRule::from('uuid'),
+                'email' => MapRule::fromGetter('getPrimaryEmail'),
+            ],
+            ['passwordHash'],
+        ));
+
+        $idSourceMember    = $mappingMetadata->parameters[0]->sourceMember;
+        $emailSourceMember = $mappingMetadata->parameters[1]->sourceMember;
+        self::assertInstanceOf(SourceMember::class, $idSourceMember);
+        self::assertInstanceOf(SourceMember::class, $emailSourceMember);
+
+        self::assertSame('uuid', $idSourceMember->name);
+        self::assertSame('property_rule', $idSourceMember->selection);
+        self::assertSame('getPrimaryEmail', $emailSourceMember->name);
+        self::assertSame('getter_rule', $emailSourceMember->selection);
+    }
+
+    public function testItGivesRulesPrecedenceOverSameNamePropertiesAndGetters(): void
+    {
+        $mappingMetadata = $this->mappingMetadataFactory->create(new MappingDefinition(
+            RulePrecedenceSource::class,
+            ProfileTarget::class,
+            [
+                'id'    => MapRule::from('uuid'),
+                'email' => MapRule::fromGetter('getPrimaryEmail'),
+            ],
+            ['id'],
+        ));
+
+        self::assertSame('uuid', $mappingMetadata->parameters[0]->sourceMember?->name);
+        self::assertSame('getPrimaryEmail', $mappingMetadata->parameters[1]->sourceMember?->name);
+    }
+
+    public function testItRejectsUnknownRuleTargetsAndInvalidConfiguredSelectors(): void
+    {
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            ProfileSource::class,
+            ProfileTarget::class,
+            [
+                'unknown' => MapRule::from('uuid'),
+            ],
+            ['passwordHash'],
+        ), 'Configured selector $uuid');
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            InvalidProfileSource::class,
+            IdTarget::class,
+            [
+                'id' => MapRule::from('privateId'),
+            ],
+        ), 'Configured property selector $privateId');
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            InvalidProfileSource::class,
+            IdTarget::class,
+            [
+                'id' => MapRule::from('staticName'),
+            ],
+        ), 'Configured property selector $staticName');
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            InvalidProfileSource::class,
+            NameTarget::class,
+            [
+                'name' => MapRule::fromGetter('getWithParameter'),
+            ],
+        ), 'Configured getter selector getWithParameter()');
+    }
+
+    public function testItRequiresIgnoredPropertiesToExistAndBePublic(): void
+    {
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            ProfileSource::class,
+            ProfileTarget::class,
+            [
+                'id'    => MapRule::from('uuid'),
+                'email' => MapRule::fromGetter('getPrimaryEmail'),
+            ],
+            ['missing'],
+        ), 'ignored source property $missing does not exist');
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            InvalidProfileSource::class,
+            IdTarget::class,
+            [
+                'id' => MapRule::from('privateId'),
+            ],
+            ['privateId'],
+        ), 'ignored source property $privateId must be public');
+    }
+
+    public function testItChecksRuleSelectedPropertiesForTypeCompatibility(): void
+    {
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            IncompatibleProfileSource::class,
+            ProfileTarget::class,
+            [
+                'id'    => MapRule::from('uuid'),
+                'email' => MapRule::fromGetter('getPrimaryEmail'),
+            ],
+            ['passwordHash'],
+        ), 'Configured selector $uuid');
+    }
+
+    public function testItIncludesTheRuleSelectorForVariadicTargetParameters(): void
+    {
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            ProfileSource::class,
+            VariadicProfileTarget::class,
+            [
+                'id' => MapRule::from('uuid'),
+            ],
+            ['passwordHash'],
+        ), 'Configured selector $uuid');
+    }
+
     /**
      * @param class-string $source
      * @param class-string $target
@@ -132,6 +257,16 @@ final class MappingMetadataFactoryTest extends TestCase
             } else {
                 self::addToAssertionCount(1);
             }
+        }
+    }
+
+    private function assertCompilationFailsWithDefinition(MappingDefinition $mappingDefinition, string $message): void
+    {
+        try {
+            $this->mappingMetadataFactory->create($mappingDefinition);
+            self::fail('Expected metadata compilation to fail.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString($message, $exception->getMessage());
         }
     }
 }

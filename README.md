@@ -45,6 +45,63 @@ Register a pair once in application wiring. Mapping always uses the exact
 runtime source class and requested target class; an unregistered pair raises
 `MappingNotRegistered`.
 
+## Customize a conventional mapping
+
+Keep DTOs independent of this package by defining exceptional source-member
+selection at registration time. A `MapRule` takes precedence over the usual
+same-name property/getter convention:
+
+```php
+use Sirix\ObjectMapper\Definition\MapRule;
+use Sirix\ObjectMapper\Definition\MappingDefinition;
+
+$definition = new MappingDefinition(
+    UserResult::class,
+    UserDto::class,
+    rules: [
+        'id' => MapRule::from('uuid'),
+        'email' => MapRule::fromGetter('getPrimaryEmail'),
+    ],
+    ignoredSource: ['passwordHash'],
+);
+```
+
+`MapRule::from()` selects exactly a public, non-static, typed source property;
+it never falls back to a getter. `MapRule::fromGetter()` selects exactly a
+public, non-static, zero-argument `get*()` method with a declared return type.
+The conventional `is*()` lookup remains available only for boolean target
+parameters. Every public source property must be mapped or listed in
+`ignoredSource`; an ignored name must still name an existing public property.
+
+## Use a hand-written mapper
+
+For policies outside safe member selection, construct and register an
+application-owned mapper instance. No container or service lookup is involved:
+
+```php
+use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
+use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
+
+final class UserResultMapper implements CustomObjectMapperInterface
+{
+    public function map(object $source): object
+    {
+        assert($source instanceof UserResult);
+
+        return new UserDto($source->uuid, $source->getPrimaryEmail());
+    }
+}
+
+$registry = new MappingRegistry([
+    new CustomMappingDefinition(UserResult::class, UserDto::class, new UserResultMapper()),
+]);
+```
+
+Custom definitions have the same exact-pair registration and final target-type
+check as generated mappers. `warmup()` deliberately skips them and returns only
+the generated conventional mapping keys, so a custom mapper is never executed
+as a warmup side effect.
+
 ## Cache warmup
 
 Use a non-public **owner-only (`0700`)** cache directory. The deployment user
@@ -57,7 +114,7 @@ the release:
 $mapper->warmup();
 ```
 
-Warmup compiles every pair and reports all failures together. It is safe to
+Warmup compiles every conventional pair and reports all failures together. It is safe to
 run repeatedly. Development may set `generateOnDemand: true`; this is a local
 convenience, not a substitute for CI/deployment warmup. Generated files are
 locked, linted, atomically published, checked for safe owner-only permissions,
@@ -75,11 +132,15 @@ directory.
   access fail before generated code is loaded.
 - Generated mappers read only the members validated at warmup; they never use
   reflection writes, magic access, or `eval()`.
+- Mapping exceptions identify the pair, target parameter, or configured
+  selector needed for diagnosis. They do not include mapped values; do not add
+  source objects containing sensitive data to application logs.
 
 ## Non-goals in 0.1.0
 
 This is not a serializer or a mapper for untrusted HTTP/JSON input. It has no
-automatic renames, casts, nested/collection traversal, reverse mapping,
-mapping into existing objects, framework/container integration, or custom
-mapper services. Keep those exceptional policies in hand-written boundary
-mappers.
+automatic casts, transformations, nested/collection traversal, reverse
+mapping, mapping into existing objects, framework/container integration,
+source-side attributes, or custom-mapper service resolution. Attributes and
+transformations are deliberately deferred; use explicit profiles or
+hand-written mappers at trusted boundaries.

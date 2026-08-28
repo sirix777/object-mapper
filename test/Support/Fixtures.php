@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapperTest\Support;
 
+use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
+
 final readonly class ConventionalSource
 {
     public function __construct(public int $id, public string $name, public bool $active) {}
@@ -109,6 +111,81 @@ final class StaticGetterSource extends StaticGetterParent {}
 final readonly class StaticGetterTarget
 {
     public function __construct(public StaticGetterSource $value) {}
+}
+
+final readonly class ProfileSource
+{
+    public function __construct(public int $uuid, public string $passwordHash) {}
+
+    public function getPrimaryEmail(): string
+    {
+        return 'ada@example.test';
+    }
+}
+
+final readonly class ProfileTarget
+{
+    public function __construct(public int $id, public string $email) {}
+}
+
+final class RulePrecedenceSource
+{
+    public function __construct(public int $id, public int $uuid) {}
+
+    public function getEmail(): string
+    {
+        return 'conventional@example.test';
+    }
+
+    public function getPrimaryEmail(): string
+    {
+        return 'profile@example.test';
+    }
+}
+
+final class IncompatibleProfileSource
+{
+    public function __construct(public string $uuid, public string $passwordHash) {}
+
+    public function getPrimaryEmail(): string
+    {
+        return 'ada@example.test';
+    }
+}
+
+final class InvalidProfileSource
+{
+    public static string $staticName = 'Ada';
+    private int $privateId           = 1;
+
+    public function getWithParameter(string $name): string
+    {
+        return $name;
+    }
+
+    public function getPrivateId(): int
+    {
+        return $this->privateId;
+    }
+}
+
+final class ThrowingGetterSource
+{
+    public function getName(): string
+    {
+        throw new MappingExecutionFailed('sensitive value');
+    }
+}
+
+final class VariadicProfileTarget
+{
+    /** @var array<int|string, int> */
+    public array $ids;
+
+    public function __construct(int ...$id)
+    {
+        $this->ids = $id;
+    }
 }
 
 abstract class AbstractFixture {}

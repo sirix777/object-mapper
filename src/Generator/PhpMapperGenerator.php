@@ -15,7 +15,7 @@ use function sprintf;
 /** @internal */
 final class PhpMapperGenerator
 {
-    private const FORMAT_VERSION = '1';
+    private const FORMAT_VERSION = '2';
 
     public function cacheKey(MappingMetadata $mappingMetadata): string
     {
@@ -75,9 +75,10 @@ final class PhpMapperGenerator
                     ? null
                     : (new ReflectionTypeExporter())->export($parameter->type, $parameter->declaringClass),
                 'source'     => null === $parameter->sourceMember ? null : [
-                    'kind' => $parameter->sourceMember->kind,
-                    'name' => $parameter->sourceMember->name,
-                    'type' => (new ReflectionTypeExporter())->export(
+                    'kind'      => $parameter->sourceMember->kind,
+                    'name'      => $parameter->sourceMember->name,
+                    'selection' => $parameter->sourceMember->selection,
+                    'type'      => (new ReflectionTypeExporter())->export(
                         $parameter->sourceMember->type,
                         $parameter->sourceMember->declaringClass,
                     ),
