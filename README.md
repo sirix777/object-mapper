@@ -36,11 +36,12 @@ $transformers = new ValueTransformerRegistry([
 $mapper = new ObjectMapper(
     $registry,
     new MapperCache(
-        new MappingMetadataFactory($transformers),
+        new MappingMetadataFactory($transformers, mappingRegistry: $registry),
         new PhpMapperGenerator(),
         __DIR__ . '/var/cache/object-mapper',
         generateOnDemand: false,
         valueTransformerRegistry: $transformers,
+        mappingRegistry: $registry,
     ),
 );
 
@@ -98,6 +99,41 @@ The conventional `is*()` lookup remains available only for boolean target
 parameters. Every public source property must be mapped or listed in
 `ignoredSource`; an ignored name must still name an existing public property.
 
+## Map nested DTOs and collections
+
+Nested traversal is explicit and uses only an exact registered pair. Select a
+source member, then configure exactly one terminal operation:
+
+```php
+new MappingDefinition(Session::class, SessionDto::class, rules: [
+    'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+    'releases' => MapRule::from('releases')->collection(
+        Release::class,
+        ReleaseDto::class,
+    ),
+]);
+```
+
+`nested()` requires the selected source member to be the exact registered
+source class (or its nullable form). `collection()` deliberately takes both
+element classes: PHP can verify that a member is `array`, but cannot recover an
+array element type at runtime. The selected source and target parameter must
+therefore be `array` or `?array`; iterables, generators, keyed output, PHPDoc
+generic inference, and implicit scalar conversion are unsupported.
+
+Collections preserve input order, discard input keys, and produce a
+`list<ReleaseDto>`. A nullable nested member or collection maps `null` only to
+`null`, never to an empty array. Nested conventional mappings are compiled as a
+dependency graph during warmup; direct and indirect cycles are rejected before
+traffic. A nested custom mapper is validated as an exact pair during warmup but
+is not invoked until mapping executes.
+
+If a collection element has the wrong runtime class, its diagnostic names the
+target parameter, expected and actual class, and the input key without rendering
+the element value. Integer keys are shown directly; string keys are represented
+by a stable SHA-256 prefix and length, so secret or control-character keys do
+not enter logs.
+
 ## Use a hand-written mapper
 
 For policies outside safe member selection, construct and register an
@@ -139,8 +175,10 @@ the release:
 $mapper->warmup();
 ```
 
-Warmup compiles every conventional pair and reports all failures together. It is safe to
-run repeatedly. Development may set `generateOnDemand: true`; this is a local
+Warmup compiles every conventional pair and its conventional nested
+dependencies in deterministic dependency order, and reports failures together.
+Cycles and missing nested registrations fail warmup rather than recursing at
+runtime. It is safe to run repeatedly. Development may set `generateOnDemand: true`; this is a local
 convenience, not a substitute for CI/deployment warmup. Generated files are
 locked, linted, atomically published, checked for safe owner-only permissions,
 and ignored by Git. Do not place the cache in a shared or attacker-writable
@@ -149,15 +187,13 @@ warm the cache with the same registry that production will use. A transformer
 signature or source-file change intentionally invalidates the generated mapper
 cache; warm again after every such deployment.
 
-## Upgrading to 0.2.0
+## Upgrading to 0.3.0
 
-`MappingMetadataFactory` and `MapperCache` now receive the same
-`ValueTransformerRegistryInterface` instance. Create the registry during
-application wiring and pass it to both construction sites, including tests and
-warmup commands. Existing mappings that do not call `through()` still require
-the constructor migration, but retain their mapping behavior. Register every
-transformer explicitly before warming; there is no implicit class construction,
-service lookup, or container integration.
+Create one `MappingRegistry` during application wiring and pass that same
+instance to both `MappingMetadataFactory` and `MapperCache` for structural
+rules. Existing transformer wiring remains shared in the same way. The
+generated-mapper cache format is now `4`, so warm the owner-only cache after
+deploying 0.3.0; existing generated mapper files are intentionally not reused.
 
 ## Mapping rules and guarantees
 
@@ -174,12 +210,14 @@ service lookup, or container integration.
   selector needed for diagnosis. They do not include mapped values; do not add
   source objects containing sensitive data to application logs.
 
-## Non-goals in 0.2.0
+## Non-goals in 0.3.0
 
 This is not a serializer or a mapper for untrusted HTTP/JSON input. It has no
-automatic casts, nested/collection traversal, reverse mapping, mapping into
-existing objects, framework/container integration, source-side attributes, or
-custom-mapper service resolution. Transformations are limited to explicitly
+automatic casts, implicit nested/collection traversal, reverse mapping,
+mapping into existing objects, framework/container integration, source-side
+attributes, or custom-mapper service resolution. `iterable`, `Traversable`,
+generators, PHPDoc element inference, keyed collection output, and scalar
+element conversion are intentionally excluded. Transformations are limited to explicitly
 registered, type-checked `through()` rules; they are not a general expression,
 callback, or service-resolution mechanism. Use hand-written mappers for
 policies outside these trusted mapping boundaries.

@@ -6,4 +6,4 @@ namespace Sirix\ObjectMapper\Exception;
 
 use RuntimeException;
 
-final class MappingExecutionFailed extends RuntimeException {}
+class MappingExecutionFailed extends RuntimeException {}

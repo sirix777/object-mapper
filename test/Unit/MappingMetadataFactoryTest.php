@@ -7,7 +7,10 @@ namespace Sirix\ObjectMapperTest\Unit;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
+use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
+use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
 use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
+use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
@@ -15,13 +18,21 @@ use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Metadata\SourceMember;
 use Sirix\ObjectMapper\Metadata\TargetParameter;
+use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
+use Sirix\ObjectMapperTest\Support\AccessToken;
+use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
 use Sirix\ObjectMapperTest\Support\BooleanGetterSource;
 use Sirix\ObjectMapperTest\Support\BooleanTarget;
 use Sirix\ObjectMapperTest\Support\ByReferenceTransformTransformer;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
+use Sirix\ObjectMapperTest\Support\CustomChildDto;
+use Sirix\ObjectMapperTest\Support\CustomChildHolderDto;
+use Sirix\ObjectMapperTest\Support\CustomChildHolderSource;
+use Sirix\ObjectMapperTest\Support\CustomChildSource;
 use Sirix\ObjectMapperTest\Support\DateTimeToAtomTransformer;
+use Sirix\ObjectMapperTest\Support\DefaultNestedTokenHolderDto;
 use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodSource;
@@ -30,10 +41,14 @@ use Sirix\ObjectMapperTest\Support\GetterSource;
 use Sirix\ObjectMapperTest\Support\IdTarget;
 use Sirix\ObjectMapperTest\Support\IncompatibleProfileSource;
 use Sirix\ObjectMapperTest\Support\IncompatibleTransformer;
+use Sirix\ObjectMapperTest\Support\InheritedCustomChildMapper;
 use Sirix\ObjectMapperTest\Support\InheritedDateTimeTransformer;
 use Sirix\ObjectMapperTest\Support\InheritedSource;
+use Sirix\ObjectMapperTest\Support\IntersectionTypedTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\InvalidMethodSource;
 use Sirix\ObjectMapperTest\Support\InvalidProfileSource;
+use Sirix\ObjectMapperTest\Support\IterableReleaseCollectionDto;
+use Sirix\ObjectMapperTest\Support\IterableReleaseCollectionSource;
 use Sirix\ObjectMapperTest\Support\MissingTarget;
 use Sirix\ObjectMapperTest\Support\MixedOutputTransformer;
 use Sirix\ObjectMapperTest\Support\MixedSource;
@@ -42,30 +57,46 @@ use Sirix\ObjectMapperTest\Support\NameTarget;
 use Sirix\ObjectMapperTest\Support\NeverTransformTransformer;
 use Sirix\ObjectMapperTest\Support\NonNullableNameTarget;
 use Sirix\ObjectMapperTest\Support\NullableOutputTransformer;
+use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionDto;
+use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionSource;
 use Sirix\ObjectMapperTest\Support\NullableSource;
+use Sirix\ObjectMapperTest\Support\NullableTokenHolderDto;
+use Sirix\ObjectMapperTest\Support\NullableTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\NullableUuidMethodSource;
 use Sirix\ObjectMapperTest\Support\ParentTarget;
 use Sirix\ObjectMapperTest\Support\PrivateSource;
 use Sirix\ObjectMapperTest\Support\PrivateTransformTransformer;
 use Sirix\ObjectMapperTest\Support\ProfileSource;
 use Sirix\ObjectMapperTest\Support\ProfileTarget;
+use Sirix\ObjectMapperTest\Support\RecordingCustomChildMapper;
+use Sirix\ObjectMapperTest\Support\Release;
+use Sirix\ObjectMapperTest\Support\ReleaseCollectionDto;
+use Sirix\ObjectMapperTest\Support\ReleaseCollectionSource;
+use Sirix\ObjectMapperTest\Support\ReleaseDto;
 use Sirix\ObjectMapperTest\Support\RulePrecedenceSource;
 use Sirix\ObjectMapperTest\Support\StaticGetterSource;
 use Sirix\ObjectMapperTest\Support\StaticGetterTarget;
 use Sirix\ObjectMapperTest\Support\StaticTransformTransformer;
 use Sirix\ObjectMapperTest\Support\StringTarget;
+use Sirix\ObjectMapperTest\Support\TokenHolderDto;
+use Sirix\ObjectMapperTest\Support\TokenHolderSource;
+use Sirix\ObjectMapperTest\Support\UnionTypedTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\UntypedParameterTransformTransformer;
 use Sirix\ObjectMapperTest\Support\UntypedReturnTransformTransformer;
+use Sirix\ObjectMapperTest\Support\UntypedTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\Uuid;
 use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
 use Sirix\ObjectMapperTest\Support\VariadicProfileTarget;
 use Sirix\ObjectMapperTest\Support\VariadicTransformTransformer;
 use Sirix\ObjectMapperTest\Support\VoidTransformTransformer;
+use Sirix\ObjectMapperTest\Support\WrongTypedTokenHolderSource;
 
 use Sirix\ObjectMapperTest\Support\ZeroArgumentTransformTransformer;
 
 use function array_map;
+use function hash;
 use function hash_file;
+use function json_encode;
 
 #[CoversClass(MappingMetadataFactory::class)]
 final class MappingMetadataFactoryTest extends TestCase
@@ -415,6 +446,212 @@ final class MappingMetadataFactoryTest extends TestCase
         }
     }
 
+    public function testItCompilesExactNestedAndCollectionDependencies(): void
+    {
+        $child                  = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class);
+        $release                = new MappingDefinition(Release::class, ReleaseDto::class);
+        $mappingMetadataFactory = $this->structuralFactory(
+            $child,
+            $release,
+            new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+                'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+            ]),
+            new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+                'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+            ]),
+        );
+
+        $nested = $mappingMetadataFactory->create(new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]))->parameters[0]->nestedMapping;
+        $collection = $mappingMetadataFactory->create(new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+            'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+        ]))->parameters[0]->nestedMapping;
+
+        self::assertNotNull($nested);
+        self::assertNotNull($collection);
+        self::assertSame('nested', $nested->operation);
+        self::assertSame(AccessToken::class, $nested->source);
+        self::assertSame(ApiAccessTokenDto::class, $nested->target);
+        self::assertSame('collection', $collection->operation);
+        self::assertSame(Release::class, $collection->elementSource);
+        self::assertSame(ReleaseDto::class, $collection->elementTarget);
+    }
+
+    public function testItCompilesNullableStructuralMappingsAndDoesNotExecuteCustomChildren(): void
+    {
+        $recordingCustomChildMapper  = new RecordingCustomChildMapper();
+        $mappingMetadataFactory      = $this->structuralFactory(
+            new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class),
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new CustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, $recordingCustomChildMapper),
+            new MappingDefinition(NullableTokenHolderSource::class, NullableTokenHolderDto::class, [
+                'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+            ]),
+            new MappingDefinition(NullableReleaseCollectionSource::class, NullableReleaseCollectionDto::class, [
+                'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+            ]),
+            new MappingDefinition(CustomChildHolderSource::class, CustomChildHolderDto::class, [
+                'child' => MapRule::from('child')->nested(CustomChildDto::class),
+            ]),
+        );
+
+        $nullableToken = $mappingMetadataFactory->create(new MappingDefinition(NullableTokenHolderSource::class, NullableTokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]))->parameters[0]->nestedMapping;
+        $nullableCollection = $mappingMetadataFactory->create(new MappingDefinition(NullableReleaseCollectionSource::class, NullableReleaseCollectionDto::class, [
+            'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+        ]))->parameters[0]->nestedMapping;
+        self::assertNotNull($nullableToken);
+        self::assertNotNull($nullableCollection);
+        self::assertTrue($nullableToken->nullable);
+        self::assertTrue($nullableCollection->nullable);
+        self::assertSame(0, $recordingCustomChildMapper->invocations);
+    }
+
+    public function testItRejectsStructuralNullableMismatchesAndDoesNotUseTargetDefaultsAsFallbacks(): void
+    {
+        $nullableMismatch = new MappingDefinition(NullableTokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+        $this->assertStructuralFailure($this->structuralFactory(
+            new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class),
+            $nullableMismatch,
+        ), $nullableMismatch, 'incompatible nullability');
+
+        $defaultTarget = new MappingDefinition(WrongTypedTokenHolderSource::class, DefaultNestedTokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+        $this->assertStructuralFailure(
+            $this->structuralFactory($defaultTarget),
+            $defaultTarget,
+            'requires registered mapping',
+        );
+    }
+
+    public function testItRejectsUnionIntersectionAndUntypedNestedSources(): void
+    {
+        foreach ([
+            UnionTypedTokenHolderSource::class        => 'concrete named class type',
+            IntersectionTypedTokenHolderSource::class => 'concrete named class type',
+            UntypedTokenHolderSource::class           => 'typed source property',
+        ] as $source => $expected) {
+            $definition = new MappingDefinition($source, TokenHolderDto::class, [
+                'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+            ]);
+
+            $this->assertStructuralFailure($this->structuralFactory($definition), $definition, $expected);
+        }
+    }
+
+    public function testItRejectsIterableCollectionsInsteadOfSilentlyTreatingThemAsArrays(): void
+    {
+        $iterableSource = new MappingDefinition(IterableReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+            'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+        ]);
+        $iterableTarget = new MappingDefinition(ReleaseCollectionSource::class, IterableReleaseCollectionDto::class, [
+            'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+        ]);
+
+        foreach ([$iterableSource, $iterableTarget] as $definition) {
+            $this->assertStructuralFailure($this->structuralFactory($definition), $definition, 'requires array or ?array', 'releases');
+        }
+    }
+
+    public function testItRejectsNestedTargetsThatCannotBeAssignedToTheConstructorParameter(): void
+    {
+        $mappingDefinition = new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(CustomChildDto::class),
+        ]);
+
+        $this->assertStructuralFailure($this->structuralFactory(
+            new CustomMappingDefinition(AccessToken::class, CustomChildDto::class, new RecordingCustomChildMapper()),
+            $mappingDefinition,
+        ), $mappingDefinition, 'not assignable to target type');
+    }
+
+    public function testItFingerprintsTheFileThatDeclaresAnInheritedCustomMapperMethod(): void
+    {
+        $customMappingDefinition = new CustomMappingDefinition(
+            CustomChildSource::class,
+            CustomChildDto::class,
+            new InheritedCustomChildMapper(),
+        );
+        $mappingDefinition = new MappingDefinition(CustomChildHolderSource::class, CustomChildHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CustomChildDto::class),
+        ]);
+
+        $fingerprint = $this->structuralFactory($customMappingDefinition, $mappingDefinition)
+            ->create($mappingDefinition)
+            ->parameters[0]
+            ->nestedMapping?->dependencyFingerprint
+        ;
+        self::assertIsString($fingerprint);
+
+        $fixtureHash = hash_file('sha256', __DIR__ . '/../Support/Fixtures.php');
+        $methodHash  = hash_file('sha256', __DIR__ . '/../Support/ExternalCustomMapperParent.php');
+        self::assertIsString($fixtureHash);
+        self::assertIsString($methodHash);
+        self::assertSame(hash('sha256', json_encode([
+            'pair'                    => CustomChildSource::class . '->' . CustomChildDto::class,
+            'kind'                    => 'custom',
+            'sourceFileHash'          => $fixtureHash,
+            'targetFileHash'          => $fixtureHash,
+            'mapperClass'             => InheritedCustomChildMapper::class,
+            'mapperFileHash'          => $fixtureHash,
+            'mapperMapMethodFileHash' => $methodHash,
+        ], JSON_THROW_ON_ERROR)), $fingerprint);
+    }
+
+    public function testItRecomputesDependencyFingerprintsForSeparateMetadataCompilations(): void
+    {
+        $firstChild  = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class);
+        $secondChild = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class, [
+            'value' => MapRule::from('value'),
+        ]);
+        $registry = new class($firstChild) implements MappingRegistryInterface {
+            public function __construct(public MappingDefinition $dependency) {}
+
+            public function get(string $source, string $target): MappingDefinitionInterface
+            {
+                return $this->dependency;
+            }
+
+            public function all(): iterable
+            {
+                return [$this->dependency];
+            }
+        };
+        $mappingMetadataFactory = new MappingMetadataFactory(new ValueTransformerRegistry(), mappingRegistry: $registry);
+        $parent                 = new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+
+        $firstFingerprint     = $mappingMetadataFactory->create($parent)->parameters[0]->nestedMapping?->dependencyFingerprint;
+        $registry->dependency = $secondChild;
+        $secondFingerprint    = $mappingMetadataFactory->create($parent)->parameters[0]->nestedMapping?->dependencyFingerprint;
+
+        self::assertIsString($firstFingerprint);
+        self::assertIsString($secondFingerprint);
+        self::assertNotSame($firstFingerprint, $secondFingerprint);
+    }
+
+    public function testItRejectsMissingAndWrongExactNestedDependenciesWithSafeContext(): void
+    {
+        $definition = new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+        $this->assertStructuralFailure($this->structuralFactory($definition), $definition, 'requires registered mapping');
+
+        $wrong = new MappingDefinition(WrongTypedTokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+        $this->assertStructuralFailure($this->structuralFactory(
+            new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class),
+            $wrong,
+        ), $wrong, WrongTypedTokenHolderSource::class);
+    }
+
     /**
      * @param class-string $source
      * @param class-string $target
@@ -422,6 +659,26 @@ final class MappingMetadataFactoryTest extends TestCase
     private function metadata(string $source, string $target): MappingMetadata
     {
         return $this->mappingMetadataFactory->create(new MappingDefinition($source, $target));
+    }
+
+    private function structuralFactory(CustomMappingDefinition|MappingDefinition ...$definitions): MappingMetadataFactory
+    {
+        $mappingRegistry = new MappingRegistry($definitions);
+
+        return new MappingMetadataFactory(new ValueTransformerRegistry(), mappingRegistry: $mappingRegistry);
+    }
+
+    private function assertStructuralFailure(MappingMetadataFactory $mappingMetadataFactory, MappingDefinition $mappingDefinition, string $expected, string $parameter = 'token'): void
+    {
+        try {
+            $mappingMetadataFactory->create($mappingDefinition);
+            self::fail('Expected structural metadata compilation to fail.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString($mappingDefinition->source(), $exception->getMessage());
+            self::assertStringContainsString($mappingDefinition->target(), $exception->getMessage());
+            self::assertStringContainsString('parameter $' . $parameter, $exception->getMessage());
+            self::assertStringContainsString($expected, $exception->getMessage());
+        }
     }
 
     /**

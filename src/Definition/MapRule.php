@@ -23,12 +23,22 @@ final readonly class MapRule
 
     private const METHOD = 'method';
 
-    /** @param null|class-string<ValueTransformerInterface> $transformer */
-    private function __construct(
-        private string $selector,
-        private string $kind,
-        private ?string $transformer = null,
-    ) {}
+    private const DIRECT = 'direct';
+
+    private const TRANSFORM = 'transform';
+
+    private const NESTED = 'nested';
+
+    private const COLLECTION = 'collection';
+
+    /**
+     * @param null|class-string<ValueTransformerInterface> $transformer
+     * @param 'collection'|'direct'|'nested'|'transform'   $operation
+     * @param null|class-string                            $nestedTarget
+     * @param null|class-string                            $collectionElementSource
+     * @param null|class-string                            $collectionElementTarget
+     */
+    private function __construct(private string $selector, private string $kind, private ?string $transformer = null, private string $operation = self::DIRECT, private ?string $nestedTarget = null, private ?string $collectionElementSource = null, private ?string $collectionElementTarget = null) {}
 
     public static function from(string $property): self
     {
@@ -66,19 +76,36 @@ final readonly class MapRule
             throw new InvalidArgumentException('A mapping rule can have only one transformer.');
         }
 
-        if (! class_exists($transformer) || ! is_a($transformer, ValueTransformerInterface::class, true)) {
-            throw new InvalidArgumentException(sprintf(
-                'Mapping rule transformer "%s" must be a class implementing %s.',
-                $transformer,
-                ValueTransformerInterface::class,
-            ));
+        if (self::DIRECT !== $this->operation) {
+            throw new InvalidArgumentException('A mapping rule terminal operation cannot be combined with a transformer.');
         }
 
-        if ((new ReflectionClass($transformer))->isAnonymous()) {
-            throw new InvalidArgumentException('Mapping rule transformers must be named classes.');
-        }
+        $transformer = $this->transformerClass($transformer);
 
-        return new self($this->selector, $this->kind, $transformer);
+        return new self($this->selector, $this->kind, $transformer, self::TRANSFORM);
+    }
+
+    public function nested(string $target): self
+    {
+        $this->assertStructuralOperationCanBeConfigured();
+        $target = $this->concreteClass($target, 'nested target');
+
+        return new self($this->selector, $this->kind, operation: self::NESTED, nestedTarget: $target);
+    }
+
+    public function collection(string $elementSource, string $elementTarget): self
+    {
+        $this->assertStructuralOperationCanBeConfigured();
+        $elementSource = $this->concreteClass($elementSource, 'collection element source');
+        $elementTarget = $this->concreteClass($elementTarget, 'collection element target');
+
+        return new self(
+            $this->selector,
+            $this->kind,
+            operation: self::COLLECTION,
+            collectionElementSource: $elementSource,
+            collectionElementTarget: $elementTarget,
+        );
     }
 
     public function selector(): string
@@ -103,7 +130,13 @@ final readonly class MapRule
 
     public function hasTransformer(): bool
     {
-        return null !== $this->transformer;
+        return self::TRANSFORM === $this->operation;
+    }
+
+    /** @return 'collection'|'direct'|'nested'|'transform' */
+    public function operation(): string
+    {
+        return $this->operation;
     }
 
     /** @return null|class-string<ValueTransformerInterface> */
@@ -112,10 +145,94 @@ final readonly class MapRule
         return $this->transformer;
     }
 
+    public function isNested(): bool
+    {
+        return self::NESTED === $this->operation;
+    }
+
+    public function isCollection(): bool
+    {
+        return self::COLLECTION === $this->operation;
+    }
+
+    /** @return null|class-string */
+    public function nestedTarget(): ?string
+    {
+        return $this->nestedTarget;
+    }
+
+    /** @return null|class-string */
+    public function collectionElementSource(): ?string
+    {
+        return $this->collectionElementSource;
+    }
+
+    /** @return null|class-string */
+    public function collectionElementTarget(): ?string
+    {
+        return $this->collectionElementTarget;
+    }
+
+    private function assertStructuralOperationCanBeConfigured(): void
+    {
+        if (self::DIRECT !== $this->operation) {
+            throw new InvalidArgumentException('A mapping rule can have only one terminal operation.');
+        }
+    }
+
+    /** @return class-string */
+    private function concreteClass(string $class, string $role): string
+    {
+        $this->assertClassName($class, $role);
+
+        if (! class_exists($class)) {
+            throw new InvalidArgumentException(sprintf('Mapping rule %s class "%s" does not exist.', $role, $class));
+        }
+
+        $reflectionClass = new ReflectionClass($class);
+
+        if ($reflectionClass->isInterface() || $reflectionClass->isAbstract() || $reflectionClass->isAnonymous()) {
+            throw new InvalidArgumentException(sprintf('Mapping rule %s class "%s" must be a named concrete class.', $role, $class));
+        }
+
+        $canonicalClass = $reflectionClass->getName();
+
+        if ($class !== $canonicalClass) {
+            throw new InvalidArgumentException(sprintf('Mapping rule %s class "%s" must use its canonical class name "%s".', $role, $class, $canonicalClass));
+        }
+
+        return $canonicalClass;
+    }
+
+    /** @return class-string<ValueTransformerInterface> */
+    private function transformerClass(string $transformer): string
+    {
+        if (! class_exists($transformer) || ! is_a($transformer, ValueTransformerInterface::class, true)) {
+            throw new InvalidArgumentException(sprintf(
+                'Mapping rule transformer "%s" must be a class implementing %s.',
+                $transformer,
+                ValueTransformerInterface::class,
+            ));
+        }
+
+        if ((new ReflectionClass($transformer))->isAnonymous()) {
+            throw new InvalidArgumentException('Mapping rule transformers must be named classes.');
+        }
+
+        return $transformer;
+    }
+
     private static function assertIdentifier(string $identifier, string $kind): void
     {
         if (1 !== preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/D', $identifier)) {
             throw new InvalidArgumentException(sprintf('Mapping rule %s "%s" must be a valid identifier.', $kind, $identifier));
+        }
+    }
+
+    private function assertClassName(string $class, string $role): void
+    {
+        if (1 !== preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*(?:\\\[a-zA-Z_][a-zA-Z0-9_]*)*$/D', $class)) {
+            throw new InvalidArgumentException(sprintf('Mapping rule %s class "%s" must be a valid canonical class name.', $role, $class));
         }
     }
 }

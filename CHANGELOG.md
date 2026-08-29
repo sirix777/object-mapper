@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-29
+
+### Added
+
+- Explicit `MapRule::nested()` and `MapRule::collection()` operations for
+  exact-pair nested DTO and `array` collection mapping.
+- Deterministic nested conventional-mapping warmup with missing-pair and cycle
+  diagnostics; custom children are validated but not executed during warmup.
+- Generated collection mapping that preserves order, emits list output, and
+  reports a safe class/key diagnostic for an invalid runtime element. Integer
+  keys are shown directly; string keys use a stable SHA-256 prefix and length.
+
+### Changed
+
+- `MappingMetadataFactory` and `MapperCache` now receive the shared mapping
+  registry when structural rules are used. Pass the same registry to both
+  construction sites.
+- Generated mapper/cache format changed to `4`. Re-warm the cache after
+  upgrading; format-3 generated mapper files are not reused.
+
+### Security
+
+- Nested dispatch resolves only exact registered source-target pairs. Generated
+  code uses fixed validated class constants and does not inspect collection
+  values beyond their runtime type.
+
 ## [0.2.0] - 2026-08-28
 
 ### Added

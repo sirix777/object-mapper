@@ -7,6 +7,7 @@ namespace Sirix\ObjectMapperTest\Support;
 use DateTimeInterface;
 use LogicException;
 use RuntimeException;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
 use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
 
@@ -430,4 +431,257 @@ final readonly class NullableUuidMethodSource
 final readonly class UuidTarget
 {
     public function __construct(public Uuid $id) {}
+}
+
+final readonly class AccessToken
+{
+    public function __construct(public string $value) {}
+}
+
+final readonly class ApiAccessTokenDto
+{
+    public function __construct(public string $value) {}
+}
+
+final readonly class TokenHolderSource
+{
+    public function __construct(public AccessToken $token) {}
+}
+
+final readonly class TokenHolderDto
+{
+    public function __construct(public ApiAccessTokenDto $token) {}
+}
+
+final readonly class NullableTokenHolderSource
+{
+    public function __construct(public ?AccessToken $token) {}
+}
+
+final readonly class NullableTokenHolderDto
+{
+    public function __construct(public ?ApiAccessTokenDto $token) {}
+}
+
+final readonly class WrongTypedTokenHolderSource
+{
+    public function __construct(public Uuid $token) {}
+}
+
+final readonly class UnionTypedTokenHolderSource
+{
+    public function __construct(public AccessToken|Uuid $token) {}
+}
+
+interface IntersectionTokenLeft {}
+
+interface IntersectionTokenRight {}
+
+final class IntersectionToken implements IntersectionTokenLeft, IntersectionTokenRight {}
+
+final readonly class IntersectionTypedTokenHolderSource
+{
+    public function __construct(public IntersectionTokenLeft&IntersectionTokenRight $token) {}
+}
+
+final class UntypedTokenHolderSource
+{
+    /** @param mixed $token */
+    public function __construct(public $token) {}
+}
+
+final readonly class DefaultNestedTokenHolderDto
+{
+    public function __construct(public ApiAccessTokenDto $token = new ApiAccessTokenDto('default')) {}
+}
+
+final readonly class Release
+{
+    public function __construct(public string $version) {}
+}
+
+final readonly class ReleaseDto
+{
+    public function __construct(public string $version) {}
+}
+
+final readonly class ReleaseCollectionSource
+{
+    /** @param array<int|string, Release> $releases */
+    public function __construct(public array $releases) {}
+}
+
+final readonly class ReleaseCollectionDto
+{
+    /** @param list<ReleaseDto> $releases */
+    public function __construct(public array $releases) {}
+}
+
+final readonly class IterableReleaseCollectionSource
+{
+    /** @param iterable<Release> $releases */
+    public function __construct(public iterable $releases) {}
+}
+
+final readonly class IterableReleaseCollectionDto
+{
+    /** @param iterable<ReleaseDto> $releases */
+    public function __construct(public iterable $releases) {}
+}
+
+final readonly class AlternativeRelease
+{
+    public function __construct(public string $version) {}
+}
+
+final readonly class AlternativeReleaseDto
+{
+    public function __construct(public string $version) {}
+}
+
+final readonly class SelectorChildSource
+{
+    public function __construct(public string $value) {}
+
+    public function getValue(): string
+    {
+        return $this->value;
+    }
+}
+
+final readonly class SelectorChildDto
+{
+    public function __construct(public string $value) {}
+}
+
+final readonly class SelectorChildHolderSource
+{
+    public function __construct(public SelectorChildSource $child) {}
+}
+
+final readonly class SelectorChildHolderDto
+{
+    public function __construct(public SelectorChildDto $child) {}
+}
+
+final readonly class NullableReleaseCollectionSource
+{
+    /** @param null|array<int|string, Release> $releases */
+    public function __construct(public ?array $releases) {}
+}
+
+final readonly class NullableReleaseCollectionDto
+{
+    /** @param null|list<ReleaseDto> $releases */
+    public function __construct(public ?array $releases) {}
+}
+
+final readonly class WrongElementReleaseCollectionSource
+{
+    /** @param array<int|string, object> $releases */
+    public function __construct(public array $releases) {}
+}
+
+final readonly class CustomChildSource
+{
+    public function __construct(public string $label) {}
+}
+
+final readonly class CustomChildDto
+{
+    public function __construct(public string $label) {}
+}
+
+final readonly class CustomChildHolderSource
+{
+    public function __construct(public CustomChildSource $child) {}
+}
+
+final readonly class CustomChildHolderDto
+{
+    public function __construct(public CustomChildDto $child) {}
+}
+
+final class RecordingCustomChildMapper implements CustomObjectMapperInterface
+{
+    public int $invocations = 0;
+
+    public function map(object $source): object
+    {
+        ++$this->invocations;
+
+        return new CustomChildDto($source instanceof CustomChildSource ? $source->label : 'unexpected');
+    }
+}
+
+final class InheritedCustomChildMapper extends ExternalCustomMapperParent {}
+
+final class ThreeLevelRootSource
+{
+    public function __construct(public ThreeLevelMiddleSource $child) {}
+}
+
+final class ThreeLevelMiddleSource
+{
+    public function __construct(public ThreeLevelLeafSource $child) {}
+}
+
+final class ThreeLevelLeafSource
+{
+    public function __construct(public string $label) {}
+}
+
+final class ThreeLevelRootDto
+{
+    public function __construct(public ThreeLevelMiddleDto $child) {}
+}
+
+final class ThreeLevelMiddleDto
+{
+    public function __construct(public ThreeLevelLeafDto $child) {}
+}
+
+final class ThreeLevelLeafDto
+{
+    public function __construct(public string $label) {}
+}
+
+final class SelfCycleSource
+{
+    public function __construct(public ?self $child = null) {}
+}
+
+final class SelfCycleDto
+{
+    public function __construct(public ?self $child = null) {}
+}
+
+final class IndirectCycleSourceA
+{
+    public IndirectCycleSourceB $child;
+}
+
+final class IndirectCycleSourceB
+{
+    public IndirectCycleSourceC $child;
+}
+
+final class IndirectCycleSourceC
+{
+    public IndirectCycleSourceA $child;
+}
+
+final class IndirectCycleDtoA
+{
+    public function __construct(public IndirectCycleDtoB $child) {}
+}
+
+final class IndirectCycleDtoB
+{
+    public function __construct(public IndirectCycleDtoC $child) {}
+}
+
+final class IndirectCycleDtoC
+{
+    public function __construct(public IndirectCycleDtoA $child) {}
 }

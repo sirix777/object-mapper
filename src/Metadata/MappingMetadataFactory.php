@@ -13,131 +13,305 @@ use ReflectionParameter;
 use ReflectionProperty;
 use ReflectionType;
 use ReflectionUnionType;
+use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
+use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
 use Sirix\ObjectMapper\Contract\ValueTransformerRegistryInterface;
+use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
 
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
+use stdClass;
 use Throwable;
 
+use WeakMap;
+
+use function array_pop;
 use function array_push;
+use function array_search;
+use function array_slice;
+use function class_exists;
+use function hash;
 use function hash_file;
+use function implode;
 use function in_array;
+use function is_a;
 use function is_file;
+use function json_encode;
+use function ksort;
 use function sprintf;
 use function ucfirst;
 
 /** @internal */
-final readonly class MappingMetadataFactory
+final class MappingMetadataFactory
 {
+    private ?object $activeCompilation = null;
+
+    /** @var WeakMap<MappingCompilationFailed, true> */
+    private WeakMap $reentrantCompilationFailures;
+
+    /** @var WeakMap<MappingCompilationFailed, true> */
+    private WeakMap $trustedCompilationFailures;
+
+    /** @var list<string> */
+    private array $dependencyStack = [];
+
+    /** @var array<string, string> */
+    private array $dependencyFingerprints = [];
+
+    /** @var array<string, MappingDefinitionInterface> */
+    private array $dependencyDefinitions = [];
+
+    /** @var array<string, MappingMetadata> */
+    private array $compiledMetadata = [];
+
+    /** @var array<string, true> */
+    private array $compilingMetadata = [];
+
+    /** @var WeakMap<NestedMappingMetadata, MappingDefinitionInterface> */
+    private WeakMap $dependencyBindings;
+
+    /** @var WeakMap<NestedMappingMetadata, MappingMetadata> */
+    private WeakMap $dependencyMetadata;
+
+    /** @var WeakMap<MappingMetadata, array{bindings: WeakMap<NestedMappingMetadata, MappingDefinitionInterface>, metadata: WeakMap<NestedMappingMetadata, MappingMetadata>}> */
+    private WeakMap $dependencySnapshots;
+
     public function __construct(
-        private ValueTransformerRegistryInterface $valueTransformerRegistry = new ValueTransformerRegistry(),
-        private TypeCompatibilityChecker $typeCompatibilityChecker = new TypeCompatibilityChecker(),
-    ) {}
+        private readonly ValueTransformerRegistryInterface $valueTransformerRegistry = new ValueTransformerRegistry(),
+        private readonly TypeCompatibilityChecker $typeCompatibilityChecker = new TypeCompatibilityChecker(),
+        private readonly ?MappingRegistryInterface $mappingRegistry = null,
+    ) {
+        $this->dependencyBindings             = new WeakMap();
+        $this->dependencyMetadata             = new WeakMap();
+        $this->reentrantCompilationFailures   = new WeakMap();
+        $this->trustedCompilationFailures     = new WeakMap();
+        $this->dependencySnapshots            = new WeakMap();
+    }
 
     public function create(MappingDefinition $mappingDefinition): MappingMetadata
     {
-        $source      = new ReflectionClass($mappingDefinition->source);
-        $target      = new ReflectionClass($mappingDefinition->target);
-        $constructor = $target->getConstructor();
+        if (null !== $this->activeCompilation) {
+            $mappingCompilationFailed                                      = new MappingCompilationFailed('Mapping metadata compilation is already active.');
+            $this->reentrantCompilationFailures[$mappingCompilationFailed] = true;
 
-        if (null === $constructor || ! $constructor->isPublic()) {
-            throw new MappingCompilationFailed(sprintf(
-                'Target class %s must have a public constructor.',
-                $target->getName(),
-            ));
+            throw $mappingCompilationFailed;
         }
 
-        $this->assertAllRulesTargetParameters($source, $target, $mappingDefinition->rules, $constructor->getParameters());
-        $this->assertIgnoredSourceProperties($source, $target, $mappingDefinition->ignoredSource);
+        $compilation             = new stdClass();
+        $this->activeCompilation = $compilation;
 
-        $parameters = [];
-        $rules      = $mappingDefinition->rules;
-        foreach ($constructor->getParameters() as $reflectionParameter) {
-            $mapRule = $rules[$reflectionParameter->getName()] ?? null;
-            if ($reflectionParameter->isVariadic()) {
-                throw new MappingCompilationFailed($this->message(
-                    $source,
-                    $target,
-                    $reflectionParameter->getName(),
-                    sprintf(
-                        '%sVariadic target parameters are not supported.',
-                        $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
-                    ),
+        // Fingerprints are valid only for one dependency traversal. A registry may
+        // deliberately provide different definitions between separate compilations.
+        try {
+            $this->dependencyStack        = [];
+            $this->dependencyFingerprints = [];
+            $this->dependencyDefinitions  = [];
+            $this->compiledMetadata       = [];
+            $this->compilingMetadata      = [];
+            $this->dependencyBindings     = new WeakMap();
+            $this->dependencyMetadata     = new WeakMap();
+
+            return $this->compile($mappingDefinition);
+        } catch (MappingCompilationFailed $mappingCompilationFailed) {
+            $this->trustedCompilationFailures[$mappingCompilationFailed] = true;
+
+            throw $mappingCompilationFailed;
+        } finally {
+            if ($this->activeCompilation === $compilation) {
+                $this->activeCompilation = null;
+            }
+        }
+    }
+
+    /** @internal */
+    public function matchesCompiledDependency(MappingMetadata $mappingMetadata, NestedMappingMetadata $nestedMappingMetadata, MappingDefinitionInterface $mappingDefinition): bool
+    {
+        $binding = $this->dependencySnapshot($mappingMetadata)['bindings'][$nestedMappingMetadata] ?? null;
+
+        return $binding === $mappingDefinition
+            && $mappingDefinition->source() === $nestedMappingMetadata->source
+            && $mappingDefinition->target() === $nestedMappingMetadata->target;
+    }
+
+    /** @internal */
+    public function compiledDependencyMetadata(MappingMetadata $mappingMetadata, NestedMappingMetadata $nestedMappingMetadata): ?MappingMetadata
+    {
+        return $this->dependencySnapshot($mappingMetadata)['metadata'][$nestedMappingMetadata] ?? null;
+    }
+
+    /** @internal */
+    public function compiledConventionalDependency(MappingMetadata $mappingMetadata, NestedMappingMetadata $nestedMappingMetadata): ?MappingDefinition
+    {
+        $binding = $this->dependencySnapshot($mappingMetadata)['bindings'][$nestedMappingMetadata] ?? null;
+
+        return $binding instanceof MappingDefinition ? $binding : null;
+    }
+
+    /** @internal */
+    public function hasCompiledCustomDependency(MappingMetadata $mappingMetadata, NestedMappingMetadata $nestedMappingMetadata): bool
+    {
+        return ($this->dependencySnapshot($mappingMetadata)['bindings'][$nestedMappingMetadata] ?? null) instanceof CustomMappingDefinition;
+    }
+
+    /** @internal */
+    public function trustedCompilationFailureMessage(Throwable $throwable): ?string
+    {
+        if (! $throwable instanceof MappingCompilationFailed || ! isset($this->trustedCompilationFailures[$throwable])) {
+            return null;
+        }
+
+        return $throwable->getMessage();
+    }
+
+    /** @return null|array{bindings: WeakMap<NestedMappingMetadata, MappingDefinitionInterface>, metadata: WeakMap<NestedMappingMetadata, MappingMetadata>} */
+    private function dependencySnapshot(MappingMetadata $mappingMetadata): ?array
+    {
+        return $this->dependencySnapshots[$mappingMetadata] ?? null;
+    }
+
+    private function compile(MappingDefinition $mappingDefinition): MappingMetadata
+    {
+        $key = $mappingDefinition->key();
+        if (isset($this->compiledMetadata[$key])) {
+            return $this->compiledMetadata[$key];
+        }
+
+        if (isset($this->compilingMetadata[$key])) {
+            throw new MappingCompilationFailed(sprintf('Mapping metadata compilation cycle detected for %s.', $key));
+        }
+
+        $this->compilingMetadata[$key] = true;
+
+        try {
+            $source      = new ReflectionClass($mappingDefinition->source);
+            $target      = new ReflectionClass($mappingDefinition->target);
+            $constructor = $target->getConstructor();
+
+            if (null === $constructor || ! $constructor->isPublic()) {
+                throw new MappingCompilationFailed(sprintf(
+                    'Target class %s must have a public constructor.',
+                    $target->getName(),
                 ));
             }
 
-            $sourceMember  = $this->findSourceMember($source, $target, $reflectionParameter, $mapRule);
-            $parameterType = $reflectionParameter->getType();
+            $this->assertAllRulesTargetParameters($source, $target, $mappingDefinition->rules, $constructor->getParameters());
+            $this->assertIgnoredSourceProperties($source, $target, $mappingDefinition->ignoredSource);
 
-            if (! $sourceMember instanceof SourceMember) {
-                if (! $reflectionParameter->isDefaultValueAvailable()) {
+            $parameters = [];
+            $rules      = $mappingDefinition->rules;
+            foreach ($constructor->getParameters() as $reflectionParameter) {
+                $mapRule = $rules[$reflectionParameter->getName()] ?? null;
+                if ($reflectionParameter->isVariadic()) {
                     throw new MappingCompilationFailed($this->message(
                         $source,
                         $target,
                         $reflectionParameter->getName(),
-                        'No safe readable source member was found.',
+                        sprintf(
+                            '%sVariadic target parameters are not supported.',
+                            $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
+                        ),
                     ));
+                }
+
+                $sourceMember  = $this->findSourceMember($source, $target, $reflectionParameter, $mapRule);
+                $parameterType = $reflectionParameter->getType();
+
+                if (! $sourceMember instanceof SourceMember) {
+                    if (! $reflectionParameter->isDefaultValueAvailable()) {
+                        throw new MappingCompilationFailed($this->message(
+                            $source,
+                            $target,
+                            $reflectionParameter->getName(),
+                            'No safe readable source member was found.',
+                        ));
+                    }
+
+                    $parameters[] = new TargetParameter(
+                        $reflectionParameter->getName(),
+                        null,
+                        true,
+                        $parameterType,
+                        $constructor->getDeclaringClass(),
+                    );
+
+                    continue;
+                }
+
+                if (null === $parameterType) {
+                    throw new MappingCompilationFailed($this->message(
+                        $source,
+                        $target,
+                        $reflectionParameter->getName(),
+                        sprintf(
+                            '%sTarget parameter has no declared type.',
+                            $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
+                        ),
+                    ));
+                }
+
+                $transformerMetadata = $mapRule instanceof MapRule && $mapRule->hasTransformer()
+                    ? $this->resolveTransformer($source, $target, $reflectionParameter, $mapRule)
+                    : null;
+
+                $nestedMappingMetadata = $mapRule instanceof MapRule && ($mapRule->isNested() || $mapRule->isCollection())
+                    ? $this->resolveNestedMapping($source, $target, $reflectionParameter, $mapRule, $sourceMember, $parameterType, $constructor->getDeclaringClass())
+                    : null;
+
+                if (! $nestedMappingMetadata instanceof NestedMappingMetadata) {
+                    $this->assertTypesAreCompatible(
+                        $source,
+                        $target,
+                        $reflectionParameter,
+                        $mapRule,
+                        $sourceMember,
+                        $parameterType,
+                        $constructor->getDeclaringClass(),
+                        $transformerMetadata,
+                    );
                 }
 
                 $parameters[] = new TargetParameter(
                     $reflectionParameter->getName(),
-                    null,
-                    true,
+                    $sourceMember,
+                    $reflectionParameter->isDefaultValueAvailable(),
                     $parameterType,
                     $constructor->getDeclaringClass(),
+                    $transformerMetadata,
+                    $nestedMappingMetadata,
                 );
-
-                continue;
             }
 
-            if (null === $parameterType) {
-                throw new MappingCompilationFailed($this->message(
-                    $source,
-                    $target,
-                    $reflectionParameter->getName(),
-                    sprintf(
-                        '%sTarget parameter has no declared type.',
-                        $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
-                    ),
-                ));
-            }
+            $this->assertNoUnmappedPublicSourceProperties($source, $target, $parameters, $mappingDefinition->ignoredSource);
 
-            $transformerMetadata = $mapRule instanceof MapRule && $mapRule->hasTransformer()
-                ? $this->resolveTransformer($source, $target, $reflectionParameter, $mapRule)
-                : null;
-
-            $this->assertTypesAreCompatible(
-                $source,
-                $target,
-                $reflectionParameter,
-                $mapRule,
-                $sourceMember,
-                $parameterType,
-                $constructor->getDeclaringClass(),
-                $transformerMetadata,
+            $mappingMetadata = new MappingMetadata(
+                $source->getName(),
+                $target->getName(),
+                $parameters,
+                $this->fileHash($source),
+                $this->fileHash($target),
             );
+            $this->compiledMetadata[$key]                = $mappingMetadata;
+            $this->dependencySnapshots[$mappingMetadata] = [
+                'bindings' => $this->dependencyBindings,
+                'metadata' => $this->dependencyMetadata,
+            ];
 
-            $parameters[] = new TargetParameter(
-                $reflectionParameter->getName(),
-                $sourceMember,
-                $reflectionParameter->isDefaultValueAvailable(),
-                $parameterType,
-                $constructor->getDeclaringClass(),
-                $transformerMetadata,
-            );
+            return $mappingMetadata;
+        } finally {
+            unset($this->compilingMetadata[$key]);
+        }
+    }
+
+    private function registerNestedDependency(NestedMappingMetadata $nestedMappingMetadata, MappingDefinitionInterface $mappingDefinition): NestedMappingMetadata
+    {
+        $this->dependencyBindings[$nestedMappingMetadata] = $mappingDefinition;
+        if ($mappingDefinition instanceof MappingDefinition) {
+            $this->dependencyMetadata[$nestedMappingMetadata] = $this->compile($mappingDefinition);
         }
 
-        $this->assertNoUnmappedPublicSourceProperties($source, $target, $parameters, $mappingDefinition->ignoredSource);
-
-        return new MappingMetadata(
-            $source->getName(),
-            $target->getName(),
-            $parameters,
-            $this->fileHash($source),
-            $this->fileHash($target),
-        );
+        return $nestedMappingMetadata;
     }
 
     /**
@@ -439,6 +613,410 @@ final readonly class MappingMetadataFactory
                 ),
             ));
         }
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     * @param ReflectionClass<object> $targetContext
+     */
+    private function resolveNestedMapping(
+        ReflectionClass $source,
+        ReflectionClass $target,
+        ReflectionParameter $reflectionParameter,
+        MapRule $mapRule,
+        SourceMember $sourceMember,
+        ReflectionType $reflectionType,
+        ReflectionClass $targetContext,
+    ): NestedMappingMetadata {
+        if ($mapRule->isNested()) {
+            $nestedTarget = $mapRule->nestedTarget();
+            if (null === $nestedTarget) {
+                throw new LogicException('A nested mapping rule must provide its target class.');
+            }
+
+            $sourceType      = $this->structuralNamedTypeForParameter($source, $target, $reflectionParameter, $mapRule, $sourceMember->type, $sourceMember->declaringClass);
+            $targetNamedType = $this->structuralNamedTypeForParameter($source, $target, $reflectionParameter, $mapRule, $reflectionType, $targetContext);
+            $dependency      = $this->resolveDependency($source, $target, $reflectionParameter, $mapRule, $sourceType['name'], $nestedTarget);
+
+            if ($sourceType['nullable'] !== $targetNamedType['nullable']) {
+                throw new MappingCompilationFailed($this->message(
+                    $source,
+                    $target,
+                    $reflectionParameter->getName(),
+                    sprintf('Configured nested selector %s has incompatible nullability.', $this->describeRule($mapRule)),
+                ));
+            }
+
+            if (! is_a($nestedTarget, $targetNamedType['name'], true)) {
+                throw new MappingCompilationFailed($this->message(
+                    $source,
+                    $target,
+                    $reflectionParameter->getName(),
+                    sprintf('Configured nested selector %s resolves to %s, which is not assignable to target type %s.', $this->describeRule($mapRule), $nestedTarget, $this->typeCompatibilityChecker->describe($reflectionType, $targetContext)),
+                ));
+            }
+
+            $dependencyFingerprint = $this->dependencyIdentity($dependency, $this->message($source, $target, $reflectionParameter->getName(), 'Configured nested mapping'));
+
+            return $this->registerNestedDependency(
+                new NestedMappingMetadata(
+                    'nested',
+                    $dependency->source(),
+                    $dependency->target(),
+                    $sourceType['nullable'],
+                    $dependencyFingerprint,
+                ),
+                $dependency,
+            );
+        }
+
+        $elementSource = $mapRule->collectionElementSource();
+        $elementTarget = $mapRule->collectionElementTarget();
+        if (null === $elementSource || null === $elementTarget) {
+            throw new LogicException('A collection mapping rule must provide both element classes.');
+        }
+
+        $sourceType      = $this->arrayStructuralTypeForParameter($source, $target, $reflectionParameter, $mapRule, $sourceMember->type, $sourceMember->declaringClass);
+        $targetArrayType = $this->arrayStructuralTypeForParameter($source, $target, $reflectionParameter, $mapRule, $reflectionType, $targetContext);
+        if ($sourceType['nullable'] !== $targetArrayType['nullable']) {
+            throw new MappingCompilationFailed($this->message(
+                $source,
+                $target,
+                $reflectionParameter->getName(),
+                sprintf('Configured collection selector %s has incompatible nullability.', $this->describeRule($mapRule)),
+            ));
+        }
+
+        $dependency = $this->resolveDependency($source, $target, $reflectionParameter, $mapRule, $elementSource, $elementTarget);
+
+        $dependencyFingerprint = $this->dependencyIdentity($dependency, $this->message($source, $target, $reflectionParameter->getName(), 'Configured collection mapping'));
+
+        return $this->registerNestedDependency(
+            new NestedMappingMetadata(
+                'collection',
+                $dependency->source(),
+                $dependency->target(),
+                $sourceType['nullable'],
+                $dependencyFingerprint,
+                $elementSource,
+                $elementTarget,
+            ),
+            $dependency,
+        );
+    }
+
+    /**
+     * @param ReflectionClass<object> $reflectionClass
+     *
+     * @return array{name: class-string, nullable: bool}
+     */
+    private function structuralNamedType(ReflectionType $reflectionType, ReflectionClass $reflectionClass): array
+    {
+        if (! $reflectionType instanceof ReflectionNamedType || $reflectionType->isBuiltin()) {
+            throw new MappingCompilationFailed(sprintf('Structural mapping requires a concrete named class type; got %s.', $this->typeCompatibilityChecker->describe($reflectionType, $reflectionClass)));
+        }
+
+        $name  = $this->resolveNamedClass($reflectionType, $reflectionClass);
+        $class = new ReflectionClass($name);
+        if ($class->isInterface() || $class->isAbstract() || $class->isAnonymous()) {
+            throw new MappingCompilationFailed(sprintf('Structural mapping requires a concrete named class type; got %s.', $name));
+        }
+
+        return [
+            'name'     => $name,
+            'nullable' => $reflectionType->allowsNull(),
+        ];
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     * @param ReflectionClass<object> $context
+     *
+     * @return array{name: class-string, nullable: bool}
+     */
+    private function structuralNamedTypeForParameter(ReflectionClass $source, ReflectionClass $target, ReflectionParameter $reflectionParameter, MapRule $mapRule, ReflectionType $reflectionType, ReflectionClass $context): array
+    {
+        try {
+            return $this->structuralNamedType($reflectionType, $context);
+        } catch (MappingCompilationFailed $exception) {
+            throw new MappingCompilationFailed($this->message($source, $target, $reflectionParameter->getName(), sprintf('Configured %s selector %s: %s', $mapRule->operation(), $this->describeRule($mapRule), $exception->getMessage())), $exception->getCode(), $exception);
+        }
+    }
+
+    /**
+     * @param ReflectionClass<object> $reflectionClass
+     *
+     * @return array{nullable: bool}
+     */
+    private function arrayStructuralType(ReflectionType $reflectionType, ReflectionClass $reflectionClass): array
+    {
+        if (! $reflectionType instanceof ReflectionNamedType || 'array' !== $reflectionType->getName()) {
+            throw new MappingCompilationFailed(sprintf('Structural collection mapping requires array or ?array; got %s.', $this->typeCompatibilityChecker->describe($reflectionType, $reflectionClass)));
+        }
+
+        return [
+            'nullable' => $reflectionType->allowsNull(),
+        ];
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     * @param ReflectionClass<object> $context
+     *
+     * @return array{nullable: bool}
+     */
+    private function arrayStructuralTypeForParameter(ReflectionClass $source, ReflectionClass $target, ReflectionParameter $reflectionParameter, MapRule $mapRule, ReflectionType $reflectionType, ReflectionClass $context): array
+    {
+        try {
+            return $this->arrayStructuralType($reflectionType, $context);
+        } catch (MappingCompilationFailed $exception) {
+            throw new MappingCompilationFailed($this->message($source, $target, $reflectionParameter->getName(), sprintf('Configured collection selector %s: %s', $this->describeRule($mapRule), $exception->getMessage())), $exception->getCode(), $exception);
+        }
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     * @param class-string            $dependencySource
+     * @param class-string            $dependencyTarget
+     */
+    private function resolveDependency(ReflectionClass $source, ReflectionClass $target, ReflectionParameter $reflectionParameter, MapRule $mapRule, string $dependencySource, string $dependencyTarget): MappingDefinitionInterface
+    {
+        return $this->snapshotDependency(
+            $dependencySource,
+            $dependencyTarget,
+            $this->message($source, $target, $reflectionParameter->getName(), sprintf('Configured %s selector %s requires registered mapping %s -> %s.', $mapRule->operation(), $this->describeRule($mapRule), $dependencySource, $dependencyTarget)),
+            $this->message($source, $target, $reflectionParameter->getName(), sprintf('Configured %s selector %s resolved the wrong mapping pair.', $mapRule->operation(), $this->describeRule($mapRule))),
+        );
+    }
+
+    /**
+     * @param ReflectionClass<object> $reflectionClass
+     *
+     * @return class-string
+     */
+    private function resolveNamedClass(ReflectionNamedType $reflectionNamedType, ReflectionClass $reflectionClass): string
+    {
+        $name = match ($reflectionNamedType->getName()) {
+            'self', 'static' => $reflectionClass->getName(),
+            'parent'         => ($parent = $reflectionClass->getParentClass()) instanceof ReflectionClass ? $parent->getName() : throw new LogicException(sprintf('%s has no parent class.', $reflectionClass->getName())),
+            default          => $reflectionNamedType->getName(),
+        };
+
+        if (! class_exists($name)) {
+            throw new MappingCompilationFailed(sprintf('Structural mapping requires a concrete named class type; got %s.', $name));
+        }
+
+        return $name;
+    }
+
+    private function dependencyIdentity(MappingDefinitionInterface $mappingDefinition, string $cycleContext): string
+    {
+        $key        = $mappingDefinition->key();
+        $cycleStart = array_search($key, $this->dependencyStack, true);
+        if (false !== $cycleStart) {
+            $cycle = [...array_slice($this->dependencyStack, $cycleStart), $key];
+
+            throw new MappingCompilationFailed(sprintf('%s: mapping dependency cycle detected: %s.', $cycleContext, implode(' -> ', $cycle)));
+        }
+
+        if (isset($this->dependencyFingerprints[$key])) {
+            return $this->dependencyFingerprints[$key];
+        }
+
+        $this->dependencyStack[] = $key;
+
+        try {
+            $this->dependencyDefinitions[$key] = $mappingDefinition;
+            $source                            = new ReflectionClass($mappingDefinition->source());
+            $target                            = new ReflectionClass($mappingDefinition->target());
+            $identity                          = [
+                'pair'           => $key,
+                'kind'           => $mappingDefinition instanceof CustomMappingDefinition ? 'custom' : 'conventional',
+                'sourceFileHash' => $this->fileHash($source),
+                'targetFileHash' => $this->fileHash($target),
+            ];
+
+            if ($mappingDefinition instanceof CustomMappingDefinition) {
+                $mapper                              = new ReflectionClass($mappingDefinition->mapper);
+                $identity['mapperClass']             = $mapper->getName();
+                $identity['mapperFileHash']          = $this->hashFile($mapper->getFileName());
+                $identity['mapperMapMethodFileHash'] = $this->hashFile($mapper->getMethod('map')->getFileName());
+            } elseif ($mappingDefinition instanceof MappingDefinition) {
+                $identity['ignoredSource'] = $mappingDefinition->ignoredSource;
+                $rules                     = $mappingDefinition->rules;
+                ksort($rules);
+                $identity['rules'] = [];
+                foreach ($rules as $parameter => $rule) {
+                    $ruleIdentity = [
+                        'parameter'               => $parameter,
+                        'selectorKind'            => $rule->selectsProperty() ? 'property' : ($rule->selectsGetter() ? 'getter' : 'method'),
+                        'selector'                => $rule->selector(),
+                        'operation'               => $rule->operation(),
+                        'transformer'             => $rule->transformer(),
+                        'transformerFileHash'     => $this->transformerFileHash($rule),
+                        'nestedTarget'            => $rule->nestedTarget(),
+                        'collectionElementSource' => $rule->collectionElementSource(),
+                        'collectionElementTarget' => $rule->collectionElementTarget(),
+                    ];
+                    if ($rule->isNested()) {
+                        $ruleIdentity['dependency'] = $this->dependencyIdentity(
+                            $this->structuralRuleDependency($source, $target, $parameter, $rule),
+                            $cycleContext,
+                        );
+                    } elseif ($rule->isCollection()) {
+                        $ruleIdentity['dependency'] = $this->dependencyIdentity(
+                            $this->structuralRuleDependency($source, $target, $parameter, $rule),
+                            $cycleContext,
+                        );
+                    }
+                    $identity['rules'][] = $ruleIdentity;
+                }
+            } else {
+                throw new MappingCompilationFailed(sprintf('%s: registered mapping %s has an unsupported definition kind.', $cycleContext, $key));
+            }
+
+            $fingerprint                        = hash('sha256', json_encode($identity, JSON_THROW_ON_ERROR));
+            $this->dependencyFingerprints[$key] = $fingerprint;
+
+            return $fingerprint;
+        } finally {
+            array_pop($this->dependencyStack);
+        }
+    }
+
+    private function transformerFileHash(MapRule $mapRule): ?string
+    {
+        $transformerClass = $mapRule->transformer();
+        if (null === $transformerClass) {
+            return null;
+        }
+
+        $reflectionClass = new ReflectionClass($transformerClass);
+        if (! $reflectionClass->hasMethod('transform')) {
+            return null;
+        }
+
+        return $this->hashFile($reflectionClass->getMethod('transform')->getFileName());
+    }
+
+    /**
+     * @param ReflectionClass<object> $source
+     * @param ReflectionClass<object> $target
+     */
+    private function structuralRuleDependency(ReflectionClass $source, ReflectionClass $target, string $parameterName, MapRule $mapRule): MappingDefinitionInterface
+    {
+        $parameter   = null;
+        $constructor = $target->getConstructor();
+        foreach ($constructor?->getParameters() ?? [] as $candidate) {
+            if ($candidate->getName() === $parameterName) {
+                $parameter = $candidate;
+
+                break;
+            }
+        }
+
+        if (! $parameter instanceof ReflectionParameter) {
+            throw new MappingCompilationFailed($this->message($source, $target, $parameterName, 'Configured structural rule does not refer to a target constructor parameter.'));
+        }
+
+        $member = $this->findSourceMember($source, $target, $parameter, $mapRule);
+        if (! $member instanceof SourceMember) {
+            throw new MappingCompilationFailed($this->message($source, $target, $parameterName, 'Configured structural selector has no safe readable source member.'));
+        }
+
+        if ($mapRule->isNested()) {
+            $sourceClass = $this->structuralNamedType($member->type, $member->declaringClass)['name'];
+            $targetClass = $mapRule->nestedTarget();
+            if (null === $targetClass) {
+                throw new LogicException('A nested mapping rule must provide a target class.');
+            }
+
+            return $this->lookupDependency($sourceClass, $targetClass, $this->message($source, $target, $parameterName, 'Configured nested mapping'));
+        }
+
+        $elementSource = $mapRule->collectionElementSource();
+        $elementTarget = $mapRule->collectionElementTarget();
+        if (null === $elementSource || null === $elementTarget) {
+            throw new LogicException('A collection mapping rule must provide both element classes.');
+        }
+
+        return $this->lookupDependency($elementSource, $elementTarget, $this->message($source, $target, $parameterName, 'Configured collection mapping'));
+    }
+
+    /**
+     * @param class-string $source
+     * @param class-string $target
+     */
+    private function lookupDependency(string $source, string $target, string $context): MappingDefinitionInterface
+    {
+        return $this->snapshotDependency(
+            $source,
+            $target,
+            sprintf('%s: nested dependency %s -> %s is not registered.', $context, $source, $target),
+            sprintf('%s: nested dependency %s -> %s resolved the wrong mapping pair.', $context, $source, $target),
+        );
+    }
+
+    /**
+     * @param class-string $source
+     * @param class-string $target
+     */
+    private function snapshotDependency(string $source, string $target, string $notRegisteredMessage, string $wrongPairMessage): MappingDefinitionInterface
+    {
+        $key = $source . '->' . $target;
+        if (isset($this->dependencyDefinitions[$key])) {
+            return $this->dependencyDefinitions[$key];
+        }
+
+        if (! $this->mappingRegistry instanceof MappingRegistryInterface) {
+            throw new MappingCompilationFailed($notRegisteredMessage);
+        }
+
+        try {
+            $mappingDefinition = $this->mappingRegistry->get($source, $target);
+            if (! $mappingDefinition instanceof MappingDefinition && ! $mappingDefinition instanceof CustomMappingDefinition) {
+                throw new LogicException('The mapping registry returned an unsupported definition type.');
+            }
+
+            $actualSource = $mappingDefinition->source();
+            $actualTarget = $mappingDefinition->target();
+        } catch (MappingCompilationFailed $exception) {
+            if ($this->isReentrantCompilationFailure($exception)) {
+                throw $exception;
+            }
+
+            throw $this->unregisteredDependencyFailure($notRegisteredMessage);
+        } catch (Throwable) {
+            throw $this->unregisteredDependencyFailure($notRegisteredMessage);
+        }
+
+        if ($actualSource !== $source || $actualTarget !== $target) {
+            throw new MappingCompilationFailed($wrongPairMessage);
+        }
+
+        $this->dependencyDefinitions[$key] = $mappingDefinition;
+
+        return $mappingDefinition;
+    }
+
+    private function isReentrantCompilationFailure(MappingCompilationFailed $mappingCompilationFailed): bool
+    {
+        if (! isset($this->reentrantCompilationFailures[$mappingCompilationFailed])) {
+            return false;
+        }
+
+        unset($this->reentrantCompilationFailures[$mappingCompilationFailed]);
+
+        return true;
+    }
+
+    private function unregisteredDependencyFailure(string $message): MappingCompilationFailed
+    {
+        return new MappingCompilationFailed($message);
     }
 
     private function isBooleanParameter(ReflectionParameter $reflectionParameter): bool
