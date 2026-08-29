@@ -6,14 +6,17 @@ namespace Sirix\ObjectMapper\Generator;
 
 use Fiber;
 use InvalidArgumentException;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
 use Sirix\ObjectMapper\Contract\ValueTransformerRegistryInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
+use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
+use Sirix\ObjectMapper\Runtime\CustomMappingExecutor;
 use Sirix\ObjectMapper\Runtime\GeneratedMappingExecutionFailed;
 use Sirix\ObjectMapper\Runtime\NestedMappingRuntimeInterface;
 use stdClass;
@@ -62,7 +65,7 @@ use function unlink;
 /**
  * @internal
  *
- * @phpstan-type Dependency array{definition: CustomMappingDefinition|MappingDefinition, mapper: GeneratedMapperInterface|null}
+ * @phpstan-type Dependency array{definition: CustomMappingDefinition|MappingDefinition|ProviderCustomMappingDefinition, mapper: GeneratedMapperInterface|null}
  * @phpstan-type CollectionFailureDetails array{source: string, target: string, parameter: string, expected: string}
  * @phpstan-type Scope array{definition: MappingDefinition, source: string, target: string, execution: object, dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}
  */
@@ -83,6 +86,8 @@ final class MapperCache implements NestedMappingRuntimeInterface
     /** @var WeakMap<object, array<string, array{dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}>> */
     private readonly WeakMap $executionMappings;
 
+    private readonly CustomMappingExecutor $customMappingExecutor;
+
     public function __construct(
         private readonly MappingMetadataFactory $mappingMetadataFactory,
         private readonly PhpMapperGenerator $phpMapperGenerator,
@@ -90,14 +95,17 @@ final class MapperCache implements NestedMappingRuntimeInterface
         private readonly ValueTransformerRegistryInterface $valueTransformerRegistry,
         private readonly bool $generateOnDemand = false,
         private readonly ?MappingRegistryInterface $mappingRegistry = null,
+        ?CustomObjectMapperProviderInterface $customObjectMapperProvider = null,
+        ?CustomMappingExecutor $customMappingExecutor = null,
     ) {
         if ('' === $cacheDirectory) {
             throw new InvalidArgumentException('The mapper cache directory cannot be empty.');
         }
 
-        $this->weakMap           = new WeakMap();
-        $this->fiberScopes       = new WeakMap();
-        $this->executionMappings = new WeakMap();
+        $this->weakMap               = new WeakMap();
+        $this->fiberScopes           = new WeakMap();
+        $this->executionMappings     = new WeakMap();
+        $this->customMappingExecutor = $customMappingExecutor ?? new CustomMappingExecutor($customObjectMapperProvider);
     }
 
     public function get(MappingDefinition $mappingDefinition): GeneratedMapperInterface
@@ -215,14 +223,9 @@ final class MapperCache implements NestedMappingRuntimeInterface
 
             $mapped = $this->executeConventional($mappingDefinition, $value, $generatedMapper);
         } elseif ($mappingDefinition instanceof CustomMappingDefinition) {
-            try {
-                $mapped = $mappingDefinition->mapper->map($value);
-            } catch (Throwable) {
-                throw new MappingExecutionFailed(sprintf(
-                    'Could not execute mapping %s.',
-                    $mappingDefinition->key(),
-                ));
-            }
+            $mapped = $this->customMappingExecutor->map($mappingDefinition, $value);
+        } elseif ($mappingDefinition instanceof ProviderCustomMappingDefinition) {
+            $mapped = $this->customMappingExecutor->map($mappingDefinition, $value);
         } else {
             throw new MappingCompilationFailed(sprintf(
                 'Nested mapping %s has an unsupported definition type %s.',
@@ -232,6 +235,13 @@ final class MapperCache implements NestedMappingRuntimeInterface
         }
 
         if (! $mapped instanceof $target) {
+            if ($mappingDefinition instanceof ProviderCustomMappingDefinition) {
+                throw new MappingExecutionFailed(sprintf(
+                    'Could not execute mapping %s.',
+                    $mappingDefinition->key(),
+                ));
+            }
+
             throw new MappingCompilationFailed(sprintf(
                 'Nested mapping %s returned %s instead of an instance of %s.',
                 $mappingDefinition->key(),
@@ -437,7 +447,9 @@ final class MapperCache implements NestedMappingRuntimeInterface
 
             try {
                 $dependency = $this->mappingRegistry->get($nested->source, $nested->target);
-                if (! $dependency instanceof MappingDefinition && ! $dependency instanceof CustomMappingDefinition) {
+                if (! $dependency instanceof MappingDefinition
+                    && ! $dependency instanceof CustomMappingDefinition
+                    && ! $dependency instanceof ProviderCustomMappingDefinition) {
                     throw new MappingCompilationFailed('Nested mapping dependency does not match its compiled definition.');
                 }
 

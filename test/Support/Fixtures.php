@@ -8,8 +8,11 @@ use DateTimeInterface;
 use LogicException;
 use RuntimeException;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
 use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
+
+use function json_decode;
 
 final readonly class ConventionalSource
 {
@@ -611,6 +614,91 @@ final class RecordingCustomChildMapper implements CustomObjectMapperInterface
         ++$this->invocations;
 
         return new CustomChildDto($source instanceof CustomChildSource ? $source->label : 'unexpected');
+    }
+}
+
+final class RecordingCustomMapperProvider implements CustomObjectMapperProviderInterface
+{
+    public int $lookups = 0;
+
+    /** @var list<string> */
+    public array $mapperIds = [];
+
+    /** @param array<string, CustomObjectMapperInterface> $mappers */
+    public function __construct(private readonly array $mappers) {}
+
+    public function get(string $mapperId): CustomObjectMapperInterface
+    {
+        ++$this->lookups;
+        $this->mapperIds[] = $mapperId;
+
+        if (! isset($this->mappers[$mapperId])) {
+            throw new RuntimeException('Unexpected mapper ID: ' . $mapperId);
+        }
+
+        return $this->mappers[$mapperId];
+    }
+}
+
+final class ThrowingCustomMapperProvider implements CustomObjectMapperProviderInterface
+{
+    public int $lookups = 0;
+
+    public function get(string $mapperId): CustomObjectMapperInterface
+    {
+        ++$this->lookups;
+
+        throw new RuntimeException('Provider must not be resolved during warmup.');
+    }
+}
+
+final class InvalidCustomMapperProvider implements CustomObjectMapperProviderInterface
+{
+    public function get(string $mapperId): CustomObjectMapperInterface
+    {
+        return json_decode($mapperId);
+    }
+}
+
+final class ProviderMapperLabelService
+{
+    public function label(string $label): string
+    {
+        return 'service:' . $label;
+    }
+}
+
+final class ServiceDependentProviderCustomMapper implements CustomObjectMapperInterface
+{
+    public int $invocations = 0;
+
+    public function __construct(private readonly ProviderMapperLabelService $providerMapperLabelService) {}
+
+    public function map(object $source): object
+    {
+        ++$this->invocations;
+
+        if (! $source instanceof CustomChildSource) {
+            throw new RuntimeException('Unexpected service-dependent custom mapping source.');
+        }
+
+        return new CustomChildDto($this->providerMapperLabelService->label($source->label));
+    }
+}
+
+final class RecordingProviderCustomMapper implements CustomObjectMapperInterface
+{
+    public int $invocations = 0;
+
+    public function map(object $source): object
+    {
+        ++$this->invocations;
+
+        return match (true) {
+            $source instanceof CustomChildSource => new CustomChildDto($source->label),
+            $source instanceof Release           => new ReleaseDto($source->version),
+            default                              => throw new RuntimeException('Unexpected provider-backed custom mapping source.'),
+        };
     }
 }
 

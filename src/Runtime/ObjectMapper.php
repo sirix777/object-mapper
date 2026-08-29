@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapper\Runtime;
 
+use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
 use Sirix\ObjectMapper\Contract\ObjectMapperInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
+use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
 use Sirix\ObjectMapper\Generator\MapperCache;
@@ -33,10 +35,16 @@ use function sprintf;
 
 final readonly class ObjectMapper implements ObjectMapperInterface
 {
+    private CustomMappingExecutor $customMappingExecutor;
+
     public function __construct(
         private MappingRegistryInterface $mappingRegistry,
         private MapperCache $mapperCache,
-    ) {}
+        ?CustomObjectMapperProviderInterface $customObjectMapperProvider = null,
+        ?CustomMappingExecutor $customMappingExecutor = null,
+    ) {
+        $this->customMappingExecutor = $customMappingExecutor ?? new CustomMappingExecutor($customObjectMapperProvider);
+    }
 
     /**
      * @template T of object
@@ -51,15 +59,8 @@ final readonly class ObjectMapper implements ObjectMapperInterface
 
         if ($mappingDefinition instanceof MappingDefinition) {
             $mapped = $this->mapperCache->map($mappingDefinition, $source);
-        } elseif ($mappingDefinition instanceof CustomMappingDefinition) {
-            try {
-                $mapped = $mappingDefinition->mapper->map($source);
-            } catch (Throwable) {
-                throw new MappingExecutionFailed(sprintf(
-                    'Could not execute mapping %s.',
-                    $mappingDefinition->key(),
-                ));
-            }
+        } elseif ($mappingDefinition instanceof CustomMappingDefinition || $mappingDefinition instanceof ProviderCustomMappingDefinition) {
+            $mapped = $this->customMappingExecutor->map($mappingDefinition, $source);
         } else {
             throw new MappingExecutionFailed(sprintf(
                 'Mapping %s has an unsupported definition type %s.',
@@ -329,6 +330,13 @@ final readonly class ObjectMapper implements ObjectMapperInterface
     private function assertTarget(object $mapped, string $target, MappingDefinitionInterface $mappingDefinition): object
     {
         if (! $mapped instanceof $target) {
+            if ($mappingDefinition instanceof ProviderCustomMappingDefinition) {
+                throw new MappingExecutionFailed(sprintf(
+                    'Could not execute mapping %s.',
+                    $mappingDefinition->key(),
+                ));
+            }
+
             throw new MappingExecutionFailed(sprintf(
                 'Mapping %s returned %s instead of an instance of %s.',
                 $mappingDefinition->key(),

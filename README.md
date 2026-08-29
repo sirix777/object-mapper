@@ -163,6 +163,58 @@ check as generated mappers. `warmup()` deliberately skips them and returns only
 the generated conventional mapping keys, so a custom mapper is never executed
 as a warmup side effect.
 
+## Resolve an application-owned custom mapper at runtime
+
+When an application custom mapper needs a service, register an opaque,
+application-configured identifier instead of exposing a container to the core:
+
+```php
+use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
+use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
+
+final class ApplicationMapperProvider implements CustomObjectMapperProviderInterface
+{
+    public function __construct(private CustomObjectMapperInterface $userResultMapper) {}
+
+    public function get(string $mapperId): CustomObjectMapperInterface
+    {
+        // Resolve only a closed application allowlist of identifiers.
+        return match ($mapperId) {
+            'user-result' => $this->userResultMapper,
+            default => throw new \LogicException('Unknown mapper identifier.'),
+        };
+    }
+}
+
+$provider = new ApplicationMapperProvider(new UserResultMapper(/* dependencies */));
+$registry = new MappingRegistry([
+    new ProviderCustomMappingDefinition(UserResult::class, UserDto::class, 'user-result'),
+]);
+
+$cache = new MapperCache(
+    new MappingMetadataFactory($transformers, mappingRegistry: $registry),
+    new PhpMapperGenerator(),
+    __DIR__ . '/var/cache/object-mapper',
+    $transformers,
+    mappingRegistry: $registry,
+    customObjectMapperProvider: $provider,
+);
+$mapper = new ObjectMapper($registry, $cache, customObjectMapperProvider: $provider);
+```
+
+Pass the same provider to `ObjectMapper` and `MapperCache`: root, nested, and
+collection custom mappings then follow identical behavior. The identifier is an
+opaque closed configuration value, never a class name or request-controlled
+service key. The core neither instantiates it nor accesses a container. Provider
+resolution happens once for each actual custom-mapping invocation; a resolved
+mapper is not retained in mapping definitions, metadata, or generated files.
+
+The application owns mapper service scope, recursive mapper use, I/O, and
+policy. Keep authorization, decryption, and redaction explicit in the custom
+mapper, and never derive mapper identifiers from request data. Provider and
+mapper failures are intentionally reported only as a failed mapping pair.
+
 ## Cache warmup
 
 Use a non-public **owner-only (`0700`)** cache directory. The deployment user
@@ -187,13 +239,16 @@ warm the cache with the same registry that production will use. A transformer
 signature or source-file change intentionally invalidates the generated mapper
 cache; warm again after every such deployment.
 
-## Upgrading to 0.3.0
+## Upgrading to 0.4.0
 
 Create one `MappingRegistry` during application wiring and pass that same
 instance to both `MappingMetadataFactory` and `MapperCache` for structural
-rules. Existing transformer wiring remains shared in the same way. The
-generated-mapper cache format is now `4`, so warm the owner-only cache after
-deploying 0.3.0; existing generated mapper files are intentionally not reused.
+rules. Existing transformer wiring remains shared in the same way. Direct
+`CustomMappingDefinition` registrations are unchanged. For provider-backed
+definitions, additionally pass the same optional provider to `ObjectMapper`
+and `MapperCache`, as shown above. `warmup()` skips every custom mapping,
+including provider-backed children: it neither resolves a provider nor creates
+or executes a custom mapper. The generated-mapper cache format remains `4`.
 
 ## Mapping rules and guarantees
 
@@ -210,12 +265,14 @@ deploying 0.3.0; existing generated mapper files are intentionally not reused.
   selector needed for diagnosis. They do not include mapped values; do not add
   source objects containing sensitive data to application logs.
 
-## Non-goals in 0.3.0
+## Non-goals in 0.4.0
 
 This is not a serializer or a mapper for untrusted HTTP/JSON input. It has no
 automatic casts, implicit nested/collection traversal, reverse mapping,
 mapping into existing objects, framework/container integration, source-side
-attributes, or custom-mapper service resolution. `iterable`, `Traversable`,
+attributes, or generic container access. Provider-backed custom mappers use a
+narrow, application-owned opaque-ID contract; a framework bridge, allowlist,
+and any PSR-11/container integration remain outside this package. `iterable`, `Traversable`,
 generators, PHPDoc element inference, keyed collection output, and scalar
 element conversion are intentionally excluded. Transformations are limited to explicitly
 registered, type-checked `through()` rules; they are not a general expression,

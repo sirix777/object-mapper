@@ -11,11 +11,13 @@ use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 use RuntimeException;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
+use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
 use Sirix\ObjectMapper\Exception\MappingNotRegistered;
@@ -24,6 +26,7 @@ use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Metadata\NestedMappingMetadata;
+use Sirix\ObjectMapper\Runtime\CustomMappingExecutor;
 use Sirix\ObjectMapper\Runtime\GeneratedMappingExecutionFailed;
 use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapper\Runtime\ObjectMapper;
@@ -48,6 +51,7 @@ use Sirix\ObjectMapperTest\Support\IndirectCycleDtoC;
 use Sirix\ObjectMapperTest\Support\IndirectCycleSourceA;
 use Sirix\ObjectMapperTest\Support\IndirectCycleSourceB;
 use Sirix\ObjectMapperTest\Support\IndirectCycleSourceC;
+use Sirix\ObjectMapperTest\Support\InvalidCustomMapperProvider;
 use Sirix\ObjectMapperTest\Support\MissingTarget;
 use Sirix\ObjectMapperTest\Support\NameTarget;
 use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionDto;
@@ -57,7 +61,10 @@ use Sirix\ObjectMapperTest\Support\NullableTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\PrivateSource;
 use Sirix\ObjectMapperTest\Support\ProfileSource;
 use Sirix\ObjectMapperTest\Support\ProfileTarget;
+use Sirix\ObjectMapperTest\Support\ProviderMapperLabelService;
 use Sirix\ObjectMapperTest\Support\RecordingCustomChildMapper;
+use Sirix\ObjectMapperTest\Support\RecordingCustomMapperProvider;
+use Sirix\ObjectMapperTest\Support\RecordingProviderCustomMapper;
 use Sirix\ObjectMapperTest\Support\Release;
 use Sirix\ObjectMapperTest\Support\ReleaseCollectionDto;
 use Sirix\ObjectMapperTest\Support\ReleaseCollectionSource;
@@ -65,12 +72,14 @@ use Sirix\ObjectMapperTest\Support\ReleaseDto;
 use Sirix\ObjectMapperTest\Support\RulePrecedenceSource;
 use Sirix\ObjectMapperTest\Support\SelfCycleDto;
 use Sirix\ObjectMapperTest\Support\SelfCycleSource;
+use Sirix\ObjectMapperTest\Support\ServiceDependentProviderCustomMapper;
 use Sirix\ObjectMapperTest\Support\ThreeLevelLeafDto;
 use Sirix\ObjectMapperTest\Support\ThreeLevelLeafSource;
 use Sirix\ObjectMapperTest\Support\ThreeLevelMiddleDto;
 use Sirix\ObjectMapperTest\Support\ThreeLevelMiddleSource;
 use Sirix\ObjectMapperTest\Support\ThreeLevelRootDto;
 use Sirix\ObjectMapperTest\Support\ThreeLevelRootSource;
+use Sirix\ObjectMapperTest\Support\ThrowingCustomMapperProvider;
 use Sirix\ObjectMapperTest\Support\ThrowingGetterSource;
 use Sirix\ObjectMapperTest\Support\ThrowingTransformer;
 use Sirix\ObjectMapperTest\Support\TokenHolderDto;
@@ -502,6 +511,213 @@ final class ObjectMapperTest extends TestCase
 
         self::assertSame([DefaultSource::class . '->' . DefaultTarget::class], $mapper->warmup());
         self::assertCount(1, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
+    }
+
+    public function testItMapsProviderBackedCustomMappingsAtTheRootOncePerInvocation(): void
+    {
+        $serviceDependentProviderCustomMapper = new ServiceDependentProviderCustomMapper(new ProviderMapperLabelService());
+        $recordingCustomMapperProvider        = new RecordingCustomMapperProvider([
+            'child-mapper' => $serviceDependentProviderCustomMapper,
+        ]);
+        $objectMapper       = $this->mapperWithProvider(
+            false,
+            $recordingCustomMapperProvider,
+            new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, 'child-mapper'),
+        );
+
+        self::assertSame('service:first', $objectMapper->map(new CustomChildSource('first'), CustomChildDto::class)->label);
+        self::assertSame('service:second', $objectMapper->map(new CustomChildSource('second'), CustomChildDto::class)->label);
+        self::assertSame(['child-mapper', 'child-mapper'], $recordingCustomMapperProvider->mapperIds);
+        self::assertSame(2, $recordingCustomMapperProvider->lookups);
+        self::assertSame(2, $serviceDependentProviderCustomMapper->invocations);
+        self::assertSame([], glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
+    }
+
+    public function testItSanitizesProviderBackedCustomMappingFailures(): void
+    {
+        $mapperId        = 'sensitive-mapper-id';
+        $sensitiveDetail = 'sensitive provider failure';
+        $definitions     = [new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, $mapperId)];
+        $providers       = [
+            new class($sensitiveDetail) implements CustomObjectMapperProviderInterface {
+                public function __construct(private readonly string $sensitiveDetail) {}
+
+                public function get(string $mapperId): CustomObjectMapperInterface
+                {
+                    throw new RuntimeException($this->sensitiveDetail);
+                }
+            },
+            new RecordingCustomMapperProvider([
+                $mapperId => new class($sensitiveDetail) implements CustomObjectMapperInterface {
+                    public function __construct(private readonly string $sensitiveDetail) {}
+
+                    public function map(object $source): object
+                    {
+                        throw new RuntimeException($this->sensitiveDetail);
+                    }
+                },
+            ]),
+            new RecordingCustomMapperProvider([
+                $mapperId => new class implements CustomObjectMapperInterface {
+                    public function map(object $source): object
+                    {
+                        return new DefaultTarget(1);
+                    }
+                },
+            ]),
+            new InvalidCustomMapperProvider(),
+        ];
+
+        foreach ($providers as $provider) {
+            try {
+                $this->mapperWithProvider(false, $provider, ...$definitions)
+                    ->map(new CustomChildSource('sensitive source value'), CustomChildDto::class)
+                ;
+                self::fail('Expected provider-backed custom mapper execution to fail.');
+            } catch (MappingExecutionFailed $exception) {
+                self::assertSame('Could not execute mapping ' . CustomChildSource::class . '->' . CustomChildDto::class . '.', $exception->getMessage());
+                self::assertStringNotContainsString($mapperId, $exception->getMessage());
+                self::assertStringNotContainsString($sensitiveDetail, $exception->getMessage());
+                self::assertStringNotContainsString('sensitive source value', $exception->getMessage());
+                self::assertNull($exception->getPrevious());
+            }
+        }
+
+        try {
+            $this->mapper(false, ...$definitions)->map(new CustomChildSource('sensitive source value'), CustomChildDto::class);
+            self::fail('Expected a missing provider to fail.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame('Could not execute mapping ' . CustomChildSource::class . '->' . CustomChildDto::class . '.', $exception->getMessage());
+            self::assertStringNotContainsString($mapperId, $exception->getMessage());
+            self::assertNull($exception->getPrevious());
+        }
+    }
+
+    public function testProviderBackedNestedAndCollectionMappingsResolveOnlyDeclaredChildren(): void
+    {
+        $recordingProviderCustomMapper     = new RecordingProviderCustomMapper();
+        $recordingCustomMapperProvider     = new RecordingCustomMapperProvider([
+            'child-mapper' => $recordingProviderCustomMapper,
+        ]);
+        $objectMapper       = $this->mapperWithProvider(
+            true,
+            $recordingCustomMapperProvider,
+            new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, 'child-mapper'),
+            new ProviderCustomMappingDefinition(Release::class, ReleaseDto::class, 'child-mapper'),
+            new MappingDefinition(CustomChildHolderSource::class, CustomChildHolderDto::class, [
+                'child' => MapRule::from('child')->nested(CustomChildDto::class),
+            ]),
+            new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+                'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+            ]),
+        );
+
+        self::assertSame('nested', $objectMapper->map(new CustomChildHolderSource(new CustomChildSource('nested')), CustomChildHolderDto::class)->child->label);
+        $releaseCollectionDto = $objectMapper->map(new ReleaseCollectionSource([
+            'first' => new Release('1.0'),
+            9       => new Release('2.0'),
+        ]), ReleaseCollectionDto::class);
+
+        self::assertSame(['1.0', '2.0'], array_map(static fn (ReleaseDto $releaseDto): string => $releaseDto->version, $releaseCollectionDto->releases));
+        self::assertSame([0, 1], array_keys($releaseCollectionDto->releases));
+        self::assertSame(['child-mapper', 'child-mapper', 'child-mapper'], $recordingCustomMapperProvider->mapperIds);
+        self::assertSame(3, $recordingCustomMapperProvider->lookups);
+        self::assertSame(3, $recordingProviderCustomMapper->invocations);
+    }
+
+    public function testItSanitizesProviderBackedNestedAndCollectionMappingFailures(): void
+    {
+        $mapperId        = 'sensitive-provider-mapper-id';
+        $sensitiveDetail = 'sensitive provider mapper output';
+        $objectMapper    = $this->mapperWithProvider(
+            true,
+            new RecordingCustomMapperProvider([
+                $mapperId => new class($sensitiveDetail) implements CustomObjectMapperInterface {
+                    public function __construct(private readonly string $sensitiveDetail) {}
+
+                    public function map(object $source): object
+                    {
+                        return new ConventionalTarget(1, $this->sensitiveDetail, true);
+                    }
+                },
+            ]),
+            new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, $mapperId),
+            new ProviderCustomMappingDefinition(Release::class, ReleaseDto::class, $mapperId),
+            new MappingDefinition(CustomChildHolderSource::class, CustomChildHolderDto::class, [
+                'child' => MapRule::from('child')->nested(CustomChildDto::class),
+            ]),
+            new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+                'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+            ]),
+        );
+
+        foreach ([
+            [new CustomChildHolderSource(new CustomChildSource('sensitive nested source')), CustomChildHolderDto::class, CustomChildHolderSource::class . '->' . CustomChildHolderDto::class],
+            [new ReleaseCollectionSource([new Release('sensitive collection source')]), ReleaseCollectionDto::class, ReleaseCollectionSource::class . '->' . ReleaseCollectionDto::class],
+        ] as [$source, $target, $pair]) {
+            try {
+                $objectMapper->map($source, $target);
+                self::fail('Expected provider-backed structural mapping to fail.');
+            } catch (MappingExecutionFailed $exception) {
+                self::assertSame('Could not execute mapping ' . $pair . '.', $exception->getMessage());
+                self::assertStringNotContainsString($mapperId, $exception->getMessage());
+                self::assertStringNotContainsString($sensitiveDetail, $exception->getMessage());
+                self::assertStringNotContainsString('sensitive nested source', $exception->getMessage());
+                self::assertStringNotContainsString('sensitive collection source', $exception->getMessage());
+                self::assertNull($exception->getPrevious());
+            }
+        }
+    }
+
+    public function testWarmupDoesNotResolveProviderBackedCustomMappings(): void
+    {
+        $throwingCustomMapperProvider = new ThrowingCustomMapperProvider();
+        $objectMapper                 = $this->mapperWithProvider(
+            false,
+            $throwingCustomMapperProvider,
+            new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, 'child-mapper'),
+            new ProviderCustomMappingDefinition(Release::class, ReleaseDto::class, 'child-mapper'),
+            new MappingDefinition(CustomChildHolderSource::class, CustomChildHolderDto::class, [
+                'child' => MapRule::from('child')->nested(CustomChildDto::class),
+            ]),
+            new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+                'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+            ]),
+        );
+
+        self::assertSame([
+            CustomChildHolderSource::class . '->' . CustomChildHolderDto::class,
+            ReleaseCollectionSource::class . '->' . ReleaseCollectionDto::class,
+        ], $objectMapper->warmup());
+        self::assertSame(0, $throwingCustomMapperProvider->lookups);
+
+        $recordingProviderCustomMapper   = new RecordingProviderCustomMapper();
+        $recordingCustomMapperProvider   = new RecordingCustomMapperProvider([
+            'child-mapper' => $recordingProviderCustomMapper,
+        ]);
+        $freshMapper = $this->mapperWithProvider(
+            false,
+            $recordingCustomMapperProvider,
+            new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, 'child-mapper'),
+            new ProviderCustomMappingDefinition(Release::class, ReleaseDto::class, 'child-mapper'),
+            new MappingDefinition(CustomChildHolderSource::class, CustomChildHolderDto::class, [
+                'child' => MapRule::from('child')->nested(CustomChildDto::class),
+            ]),
+            new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+                'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+            ]),
+        );
+
+        self::assertSame('runtime', $freshMapper->map(
+            new CustomChildHolderSource(new CustomChildSource('runtime')),
+            CustomChildHolderDto::class,
+        )->child->label);
+        self::assertSame(['runtime'], array_map(
+            static fn (ReleaseDto $releaseDto): string => $releaseDto->version,
+            $freshMapper->map(new ReleaseCollectionSource([new Release('runtime')]), ReleaseCollectionDto::class)->releases,
+        ));
+        self::assertSame(2, $recordingCustomMapperProvider->lookups);
+        self::assertSame(2, $recordingProviderCustomMapper->invocations);
     }
 
     public function testItMapsNestedObjectsCollectionsAndNullableStructuralValues(): void
@@ -1541,6 +1757,32 @@ final class ObjectMapperTest extends TestCase
                 $generateOnDemand,
                 $mappingRegistry,
             ),
+        );
+    }
+
+    private function mapperWithProvider(
+        bool $generateOnDemand,
+        ?CustomObjectMapperProviderInterface $customObjectMapperProvider,
+        MappingDefinitionInterface ...$definitions,
+    ): ObjectMapper {
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mappingRegistry          = new MappingRegistry($definitions);
+        $customMappingExecutor    = new CustomMappingExecutor($customObjectMapperProvider);
+
+        return new ObjectMapper(
+            $mappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                $generateOnDemand,
+                $mappingRegistry,
+                $customObjectMapperProvider,
+                $customMappingExecutor,
+            ),
+            $customObjectMapperProvider,
+            $customMappingExecutor,
         );
     }
 

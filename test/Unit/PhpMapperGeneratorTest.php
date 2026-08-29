@@ -8,6 +8,7 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
+use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
@@ -23,6 +24,10 @@ use Sirix\ObjectMapperTest\Support\AlternativeUuidToStringTransformer;
 use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
+use Sirix\ObjectMapperTest\Support\CustomChildDto;
+use Sirix\ObjectMapperTest\Support\CustomChildHolderDto;
+use Sirix\ObjectMapperTest\Support\CustomChildHolderSource;
+use Sirix\ObjectMapperTest\Support\CustomChildSource;
 use Sirix\ObjectMapperTest\Support\DateTimeToAtomTransformer;
 use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
@@ -294,5 +299,29 @@ final class PhpMapperGeneratorTest extends TestCase
             $propertyMetadata->targetFileHash,
         );
         self::assertNotSame($phpMapperGenerator->cacheKey($propertyMetadata), $phpMapperGenerator->cacheKey($mappingMetadata));
+    }
+
+    public function testItsCacheKeyChangesForProviderCustomMapperIdsWithoutGeneratingProviderCode(): void
+    {
+        $mappingDefinition = new MappingDefinition(CustomChildHolderSource::class, CustomChildHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CustomChildDto::class),
+        ]);
+        $mappingMetadata = (new MappingMetadataFactory(mappingRegistry: new MappingRegistry([
+            new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, 'custom-child-v1'),
+            $mappingDefinition,
+        ])))->create($mappingDefinition);
+        $secondMetadata = (new MappingMetadataFactory(mappingRegistry: new MappingRegistry([
+            new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, 'custom-child-v2'),
+            $mappingDefinition,
+        ])))->create($mappingDefinition);
+        $phpMapperGenerator = new PhpMapperGenerator();
+
+        $firstKey  = $phpMapperGenerator->cacheKey($mappingMetadata);
+        $generated = $phpMapperGenerator->generate($mappingMetadata, $firstKey);
+
+        self::assertNotSame($firstKey, $phpMapperGenerator->cacheKey($secondMetadata));
+        self::assertStringNotContainsString('custom-child-v1', $generated);
+        self::assertStringNotContainsString('CustomObjectMapperProvider', $generated);
+        self::assertStringNotContainsString('->get(', $generated);
     }
 }

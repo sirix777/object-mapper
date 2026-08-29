@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-29
+
+### Added
+
+- `CustomObjectMapperProviderInterface` and
+  `ProviderCustomMappingDefinition` for application-owned, opaque custom mapper
+  identifiers resolved only at mapping runtime.
+- Optional provider wiring for root, nested, and collection custom mappings.
+  Provider-backed identifiers participate in structural cache identity, but no
+  resolved mapper or service is stored in generated metadata or cache files.
+
+### Changed
+
+- Direct `CustomMappingDefinition` wiring and constructors remain unchanged.
+  Applications using provider-backed definitions pass the same optional provider
+  to `ObjectMapper` and `MapperCache`.
+- The core remains framework- and container-free, with no production dependency
+  additions. Any framework/PSR-11 bridge is a separately released package with
+  its own compatible core range.
+
+### Security
+
+- Provider lookup and custom mapper failures are normalized to pair-only
+  execution errors. Warmup does not resolve, construct, or execute custom
+  mappers, including provider-backed structural children.
+
 ## [0.3.0] - 2026-08-29
 
 ### Added

@@ -13,9 +13,11 @@ use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
+use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
+use Sirix\ObjectMapper\Metadata\NestedMappingMetadata;
 use Sirix\ObjectMapper\Metadata\SourceMember;
 use Sirix\ObjectMapper\Metadata\TargetParameter;
 use Sirix\ObjectMapper\Runtime\MappingRegistry;
@@ -603,6 +605,77 @@ final class MappingMetadataFactoryTest extends TestCase
         ], JSON_THROW_ON_ERROR)), $fingerprint);
     }
 
+    public function testItFingerprintsProviderCustomDependenciesByOpaqueMapperId(): void
+    {
+        $mappingDefinition = new MappingDefinition(CustomChildHolderSource::class, CustomChildHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CustomChildDto::class),
+        ]);
+        $firstChild = new ProviderCustomMappingDefinition(
+            CustomChildSource::class,
+            CustomChildDto::class,
+            'custom-child-v1',
+        );
+        $secondChild = new ProviderCustomMappingDefinition(
+            CustomChildSource::class,
+            CustomChildDto::class,
+            'custom-child-v2',
+        );
+
+        $firstFingerprint = $this->structuralFactory($firstChild, $mappingDefinition)
+            ->create($mappingDefinition)
+            ->parameters[0]
+            ->nestedMapping?->dependencyFingerprint
+        ;
+        $secondFingerprint = $this->structuralFactory($secondChild, $mappingDefinition)
+            ->create($mappingDefinition)
+            ->parameters[0]
+            ->nestedMapping?->dependencyFingerprint
+        ;
+
+        $fixtureHash = hash_file('sha256', __DIR__ . '/../Support/Fixtures.php');
+        self::assertIsString($fixtureHash);
+        self::assertSame(hash('sha256', json_encode([
+            'pair'           => CustomChildSource::class . '->' . CustomChildDto::class,
+            'kind'           => 'provider_custom',
+            'sourceFileHash' => $fixtureHash,
+            'targetFileHash' => $fixtureHash,
+            'mapperId'       => 'custom-child-v1',
+        ], JSON_THROW_ON_ERROR)), $firstFingerprint);
+        self::assertNotSame($firstFingerprint, $secondFingerprint);
+    }
+
+    public function testItFingerprintsProviderCustomCollectionDependenciesByOpaqueMapperId(): void
+    {
+        $mappingDefinition = new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+            'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+        ]);
+        $providerCustomMappingDefinition = new ProviderCustomMappingDefinition(
+            Release::class,
+            ReleaseDto::class,
+            'release-collection-v1',
+        );
+        $mappingMetadataFactory = $this->structuralFactory($providerCustomMappingDefinition, $mappingDefinition);
+        $mappingMetadata        = $mappingMetadataFactory->create($mappingDefinition);
+        $collectionMapping      = $mappingMetadata->parameters[0]->nestedMapping;
+
+        self::assertInstanceOf(NestedMappingMetadata::class, $collectionMapping);
+        self::assertSame('collection', $collectionMapping->operation);
+        self::assertTrue($mappingMetadataFactory->hasCompiledCustomDependency(
+            $mappingMetadata,
+            $collectionMapping,
+        ));
+
+        $fixtureHash = hash_file('sha256', __DIR__ . '/../Support/Fixtures.php');
+        self::assertIsString($fixtureHash);
+        self::assertSame(hash('sha256', json_encode([
+            'pair'           => Release::class . '->' . ReleaseDto::class,
+            'kind'           => 'provider_custom',
+            'sourceFileHash' => $fixtureHash,
+            'targetFileHash' => $fixtureHash,
+            'mapperId'       => 'release-collection-v1',
+        ], JSON_THROW_ON_ERROR)), $collectionMapping->dependencyFingerprint);
+    }
+
     public function testItRecomputesDependencyFingerprintsForSeparateMetadataCompilations(): void
     {
         $firstChild  = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class);
@@ -661,7 +734,7 @@ final class MappingMetadataFactoryTest extends TestCase
         return $this->mappingMetadataFactory->create(new MappingDefinition($source, $target));
     }
 
-    private function structuralFactory(CustomMappingDefinition|MappingDefinition ...$definitions): MappingMetadataFactory
+    private function structuralFactory(CustomMappingDefinition|MappingDefinition|ProviderCustomMappingDefinition ...$definitions): MappingMetadataFactory
     {
         $mappingRegistry = new MappingRegistry($definitions);
 

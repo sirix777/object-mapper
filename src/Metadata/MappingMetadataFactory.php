@@ -19,6 +19,7 @@ use Sirix\ObjectMapper\Contract\ValueTransformerRegistryInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
+use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
@@ -152,7 +153,9 @@ final class MappingMetadataFactory
     /** @internal */
     public function hasCompiledCustomDependency(MappingMetadata $mappingMetadata, NestedMappingMetadata $nestedMappingMetadata): bool
     {
-        return ($this->dependencySnapshot($mappingMetadata)['bindings'][$nestedMappingMetadata] ?? null) instanceof CustomMappingDefinition;
+        $binding = $this->dependencySnapshot($mappingMetadata)['bindings'][$nestedMappingMetadata] ?? null;
+
+        return $binding instanceof CustomMappingDefinition || $binding instanceof ProviderCustomMappingDefinition;
     }
 
     /** @internal */
@@ -835,12 +838,14 @@ final class MappingMetadataFactory
             $target                            = new ReflectionClass($mappingDefinition->target());
             $identity                          = [
                 'pair'           => $key,
-                'kind'           => $mappingDefinition instanceof CustomMappingDefinition ? 'custom' : 'conventional',
+                'kind'           => $mappingDefinition instanceof ProviderCustomMappingDefinition ? 'provider_custom' : ($mappingDefinition instanceof CustomMappingDefinition ? 'custom' : 'conventional'),
                 'sourceFileHash' => $this->fileHash($source),
                 'targetFileHash' => $this->fileHash($target),
             ];
 
-            if ($mappingDefinition instanceof CustomMappingDefinition) {
+            if ($mappingDefinition instanceof ProviderCustomMappingDefinition) {
+                $identity['mapperId'] = $mappingDefinition->mapperId();
+            } elseif ($mappingDefinition instanceof CustomMappingDefinition) {
                 $mapper                              = new ReflectionClass($mappingDefinition->mapper);
                 $identity['mapperClass']             = $mapper->getName();
                 $identity['mapperFileHash']          = $this->hashFile($mapper->getFileName());
@@ -978,7 +983,10 @@ final class MappingMetadataFactory
 
         try {
             $mappingDefinition = $this->mappingRegistry->get($source, $target);
-            if (! $mappingDefinition instanceof MappingDefinition && ! $mappingDefinition instanceof CustomMappingDefinition) {
+            if (! $mappingDefinition instanceof MappingDefinition
+                && ! $mappingDefinition instanceof CustomMappingDefinition
+                && ! $mappingDefinition instanceof ProviderCustomMappingDefinition
+            ) {
                 throw new LogicException('The mapping registry returned an unsupported definition type.');
             }
 
