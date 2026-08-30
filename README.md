@@ -1,5 +1,7 @@
 # sirix/object-mapper
 
+[![Latest Stable Version](http://poser.pugx.org/sirix/object-mapper/v)](https://packagist.org/packages/sirix/object-mapper) [![Total Downloads](http://poser.pugx.org/sirix/object-mapper/downloads)](https://packagist.org/packages/sirix/object-mapper) [![Latest Unstable Version](http://poser.pugx.org/sirix/object-mapper/v/unstable)](https://packagist.org/packages/sirix/object-mapper) [![License](http://poser.pugx.org/sirix/object-mapper/license)](https://packagist.org/packages/sirix/object-mapper) [![PHP Version Require](http://poser.pugx.org/sirix/object-mapper/require/php)](https://packagist.org/packages/sirix/object-mapper)
+
 `sirix/object-mapper` is a dependency-free mapper for explicit, trusted
 `object -> object` boundaries. It compiles registered conventional mappings to
 small PHP classes that use public source reads and a target's public
