@@ -73,6 +73,10 @@ $definition = new MappingDefinition(
             ->through(UuidToString::class),
         'createdAt' => MapRule::fromMethod('createdAt')
             ->through(DateTimeToAtom::class),
+        'kind' => MapRule::constant('external'),
+        'enabled' => MapRule::constant(true),
+        'rank' => MapRule::constant(0),
+        'note' => MapRule::constant(null),
     ],
     ignoredSource: ['passwordHash'],
 );
@@ -94,6 +98,23 @@ metadata factory and cache. The registry uses exact runtime classes only: it
 does not instantiate classes, resolve services, or consult a framework
 container. Transformations are explicit and type-checked; the mapper never
 performs implicit casts.
+
+`MapRule::constant()` is a source-less terminal rule for trusted, fixed DTO
+values. It accepts only `null`, `bool`, `int`, finite `float`, and `string`;
+the value must be exactly compatible with the target constructor type during
+warmup. Numeric strings, booleans, `null`, and integers are never coerced to a
+different scalar type. A constant neither reads nor maps a same-named public
+source property, so that property must still be selected by another rule or be
+listed in `ignoredSource`.
+
+Constants are compiled into generated cache PHP. Register only non-secret,
+non-request-controlled application configuration: never put passwords, tokens,
+ciphertext/plaintext, or personal data in a constant. `constant()` cannot be
+combined with `through()`, `nested()`, or `collection()`. There is deliberately
+no conditional rule, expression language, callback, property path, dynamic
+method call, or service lookup; use a typed transformer for a trivial derived
+value and an application-owned custom mapper for policy, authorization,
+redaction, decryption, I/O, or stateful behavior.
 
 The conventional `is*()` lookup remains available only for boolean target
 parameters. Every public source property must be mapped or listed in
@@ -237,9 +258,11 @@ and ignored by Git. Do not place the cache in a shared or attacker-writable
 directory. Deploy the transformer classes and application wiring first, then
 warm the cache with the same registry that production will use. A transformer
 signature or source-file change intentionally invalidates the generated mapper
-cache; warm again after every such deployment.
+cache; warm again after every such deployment. Constant values participate in
+the same cache identity and are emitted as fixed literals, so re-warm after a
+constant registration changes as well.
 
-## Upgrading to 0.4.0
+## Upgrading to 0.5.0
 
 Create one `MappingRegistry` during application wiring and pass that same
 instance to both `MappingMetadataFactory` and `MapperCache` for structural
@@ -248,7 +271,14 @@ rules. Existing transformer wiring remains shared in the same way. Direct
 definitions, additionally pass the same optional provider to `ObjectMapper`
 and `MapperCache`, as shown above. `warmup()` skips every custom mapping,
 including provider-backed children: it neither resolves a provider nor creates
-or executes a custom mapper. The generated-mapper cache format remains `4`.
+or executes a custom mapper.
+
+`MapRule::constant()` is the only new mapping rule in 0.5.0; no conditional
+operation shipped. The generated-mapper cache format is now `5`, so format-4
+files are not reusable. Deploy the 0.5.0 code and trusted registrations first,
+then clear or rotate the old owner-only cache directory, create the new
+owner-only (`0700`) directory, and warm it as the runtime owner before serving
+traffic.
 
 ## Mapping rules and guarantees
 
@@ -259,13 +289,14 @@ or executes a custom mapper. The generated-mapper cache format remains `4`.
 - Required source and target declarations must be type-compatible. Untyped
   source values, narrowing `mixed`, nullability violations, and unsupported
   access fail before generated code is loaded.
-- Generated mappers read only the members validated at warmup; they never use
-  reflection writes, magic access, or `eval()`.
+- Generated mappers read only validated source members and fixed validated
+  constant literals; they never use reflection writes, magic access, or
+  `eval()`.
 - Mapping exceptions identify the pair, target parameter, or configured
   selector needed for diagnosis. They do not include mapped values; do not add
   source objects containing sensitive data to application logs.
 
-## Non-goals in 0.4.0
+## Non-goals in 0.5.0
 
 This is not a serializer or a mapper for untrusted HTTP/JSON input. It has no
 automatic casts, implicit nested/collection traversal, reverse mapping,
@@ -276,5 +307,6 @@ and any PSR-11/container integration remain outside this package. `iterable`, `T
 generators, PHPDoc element inference, keyed collection output, and scalar
 element conversion are intentionally excluded. Transformations are limited to explicitly
 registered, type-checked `through()` rules; they are not a general expression,
-callback, or service-resolution mechanism. Use hand-written mappers for
-policies outside these trusted mapping boundaries.
+callback, conditional, closure, property path, dynamic method, or
+service-resolution mechanism. Use hand-written mappers for policies outside
+these trusted mapping boundaries.

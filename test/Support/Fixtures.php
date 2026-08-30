@@ -65,6 +65,67 @@ final readonly class DefaultTarget
     public function __construct(public int $id, public string $label = 'default') {}
 }
 
+final class ConstantSource {}
+
+final readonly class ConstantTarget
+{
+    public function __construct(public string $value) {}
+}
+
+final readonly class NullableConstantTarget
+{
+    public function __construct(public ?string $value) {}
+}
+
+final readonly class UnionConstantTarget
+{
+    public function __construct(public int|string $value) {}
+}
+
+final readonly class MixedConstantTarget
+{
+    public function __construct(public mixed $value) {}
+}
+
+final readonly class ScalarConstantsTarget
+{
+    public function __construct(
+        public ?string $nullable,
+        public bool $enabled,
+        public int $rank,
+        public float $ratio,
+        public string $label,
+        public int|string $union,
+    ) {}
+}
+
+final readonly class DefaultConstantTarget
+{
+    public function __construct(public string $value = 'default') {}
+}
+
+final class UntypedConstantTarget
+{
+    /** @param mixed $value */
+    public function __construct(public $value) {}
+}
+
+final class VariadicConstantTarget
+{
+    /** @var array<int|string, string> */
+    public array $values;
+
+    public function __construct(string ...$value)
+    {
+        $this->values = $value;
+    }
+}
+
+final readonly class SameNamedConstantSource
+{
+    public function __construct(public string $value) {}
+}
+
 final readonly class MissingTarget
 {
     public function __construct(public int $missing) {}

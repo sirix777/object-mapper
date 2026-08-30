@@ -21,7 +21,7 @@ use function str_replace;
 /** @internal */
 final class PhpMapperGenerator
 {
-    private const FORMAT_VERSION = '4';
+    private const FORMAT_VERSION = '5';
 
     public function cacheKey(MappingMetadata $mappingMetadata): string
     {
@@ -35,10 +35,21 @@ final class PhpMapperGenerator
 
     public function generate(MappingMetadata $mappingMetadata, string $cacheKey): string
     {
-        $arguments         = [];
-        $collectionMethods = [];
-        $statements        = [];
+        $arguments              = [];
+        $collectionMethods      = [];
+        $statements             = [];
+        $constantValueExporter  = new ConstantValueExporter();
         foreach ($mappingMetadata->parameters as $index => $parameter) {
+            if (null !== $parameter->constant) {
+                $arguments[] = sprintf(
+                    '            %s: %s,',
+                    $parameter->name,
+                    $constantValueExporter->export($parameter->constant),
+                );
+
+                continue;
+            }
+
             if (null === $parameter->sourceMember) {
                 continue;
             }
@@ -214,6 +225,7 @@ final class PhpMapperGenerator
                     'elementTarget'         => $parameter->nestedMapping->elementTarget,
                     'dependencyFingerprint' => $parameter->nestedMapping->dependencyFingerprint,
                 ],
+                'constant'      => null === $parameter->constant ? null : $parameter->constant->identity(),
             ];
         }
 

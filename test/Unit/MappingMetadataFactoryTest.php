@@ -27,6 +27,8 @@ use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
 use Sirix\ObjectMapperTest\Support\BooleanGetterSource;
 use Sirix\ObjectMapperTest\Support\BooleanTarget;
 use Sirix\ObjectMapperTest\Support\ByReferenceTransformTransformer;
+use Sirix\ObjectMapperTest\Support\ConstantSource;
+use Sirix\ObjectMapperTest\Support\ConstantTarget;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
 use Sirix\ObjectMapperTest\Support\CustomChildDto;
@@ -34,6 +36,7 @@ use Sirix\ObjectMapperTest\Support\CustomChildHolderDto;
 use Sirix\ObjectMapperTest\Support\CustomChildHolderSource;
 use Sirix\ObjectMapperTest\Support\CustomChildSource;
 use Sirix\ObjectMapperTest\Support\DateTimeToAtomTransformer;
+use Sirix\ObjectMapperTest\Support\DefaultConstantTarget;
 use Sirix\ObjectMapperTest\Support\DefaultNestedTokenHolderDto;
 use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
@@ -52,12 +55,14 @@ use Sirix\ObjectMapperTest\Support\InvalidProfileSource;
 use Sirix\ObjectMapperTest\Support\IterableReleaseCollectionDto;
 use Sirix\ObjectMapperTest\Support\IterableReleaseCollectionSource;
 use Sirix\ObjectMapperTest\Support\MissingTarget;
+use Sirix\ObjectMapperTest\Support\MixedConstantTarget;
 use Sirix\ObjectMapperTest\Support\MixedOutputTransformer;
 use Sirix\ObjectMapperTest\Support\MixedSource;
 use Sirix\ObjectMapperTest\Support\MultipleArgumentTransformTransformer;
 use Sirix\ObjectMapperTest\Support\NameTarget;
 use Sirix\ObjectMapperTest\Support\NeverTransformTransformer;
 use Sirix\ObjectMapperTest\Support\NonNullableNameTarget;
+use Sirix\ObjectMapperTest\Support\NullableConstantTarget;
 use Sirix\ObjectMapperTest\Support\NullableOutputTransformer;
 use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionDto;
 use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionSource;
@@ -76,18 +81,22 @@ use Sirix\ObjectMapperTest\Support\ReleaseCollectionDto;
 use Sirix\ObjectMapperTest\Support\ReleaseCollectionSource;
 use Sirix\ObjectMapperTest\Support\ReleaseDto;
 use Sirix\ObjectMapperTest\Support\RulePrecedenceSource;
+use Sirix\ObjectMapperTest\Support\SameNamedConstantSource;
 use Sirix\ObjectMapperTest\Support\StaticGetterSource;
 use Sirix\ObjectMapperTest\Support\StaticGetterTarget;
 use Sirix\ObjectMapperTest\Support\StaticTransformTransformer;
 use Sirix\ObjectMapperTest\Support\StringTarget;
 use Sirix\ObjectMapperTest\Support\TokenHolderDto;
 use Sirix\ObjectMapperTest\Support\TokenHolderSource;
+use Sirix\ObjectMapperTest\Support\UnionConstantTarget;
 use Sirix\ObjectMapperTest\Support\UnionTypedTokenHolderSource;
+use Sirix\ObjectMapperTest\Support\UntypedConstantTarget;
 use Sirix\ObjectMapperTest\Support\UntypedParameterTransformTransformer;
 use Sirix\ObjectMapperTest\Support\UntypedReturnTransformTransformer;
 use Sirix\ObjectMapperTest\Support\UntypedTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\Uuid;
 use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
+use Sirix\ObjectMapperTest\Support\VariadicConstantTarget;
 use Sirix\ObjectMapperTest\Support\VariadicProfileTarget;
 use Sirix\ObjectMapperTest\Support\VariadicTransformTransformer;
 use Sirix\ObjectMapperTest\Support\VoidTransformTransformer;
@@ -137,6 +146,112 @@ final class MappingMetadataFactoryTest extends TestCase
 
         self::assertNull($metadata->parameters[1]->sourceMember);
         self::assertTrue($metadata->parameters[1]->hasDefault);
+    }
+
+    public function testItCompilesTypedSourceLessConstantsWithoutUsingDefaults(): void
+    {
+        $mappingMetadata = $this->mappingMetadataFactory->create(new MappingDefinition(
+            ConstantSource::class,
+            DefaultConstantTarget::class,
+            [
+                'value' => MapRule::constant('configured'),
+            ],
+        ));
+
+        self::assertNull($mappingMetadata->parameters[0]->sourceMember);
+        self::assertTrue($mappingMetadata->parameters[0]->hasDefault);
+        self::assertNotNull($mappingMetadata->parameters[0]->constant);
+        self::assertSame('string', $mappingMetadata->parameters[0]->constant->kind);
+        self::assertSame('configured', $mappingMetadata->parameters[0]->constant->value);
+    }
+
+    public function testItValidatesConstantLiteralTypesWithoutPhpCoercion(): void
+    {
+        foreach ([
+            [ConstantTarget::class, MapRule::constant(1)],
+            [ConstantTarget::class, MapRule::constant(true)],
+            [ConstantTarget::class, MapRule::constant(null)],
+            [UnionConstantTarget::class, MapRule::constant(1.0)],
+            [ParentTarget::class, MapRule::constant('value')],
+        ] as [$target, $rule]) {
+            $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+                ConstantSource::class,
+                $target,
+                [
+                    'value' => $rule,
+                ],
+            ), 'Configured constant is not assignable');
+        }
+
+        self::assertSame('null', $this->mappingMetadataFactory->create(new MappingDefinition(
+            ConstantSource::class,
+            NullableConstantTarget::class,
+            [
+                'value' => MapRule::constant(null),
+            ],
+        ))->parameters[0]->constant?->kind);
+        self::assertSame('int', $this->mappingMetadataFactory->create(new MappingDefinition(
+            ConstantSource::class,
+            UnionConstantTarget::class,
+            [
+                'value' => MapRule::constant(1),
+            ],
+        ))->parameters[0]->constant?->kind);
+        self::assertSame('bool', $this->mappingMetadataFactory->create(new MappingDefinition(
+            ConstantSource::class,
+            MixedConstantTarget::class,
+            [
+                'value' => MapRule::constant(false),
+            ],
+        ))->parameters[0]->constant?->kind);
+    }
+
+    public function testItRejectsUntypedAndVariadicConstantTargets(): void
+    {
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            ConstantSource::class,
+            UntypedConstantTarget::class,
+            [
+                'value' => MapRule::constant('value'),
+            ],
+        ), 'has no declared type');
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            ConstantSource::class,
+            VariadicConstantTarget::class,
+            [
+                'value' => MapRule::constant('value'),
+            ],
+        ), 'Configured constant: Variadic target parameters are not supported');
+    }
+
+    public function testItUsesConstantSpecificDiagnosticsWithoutDisclosingTheLiteral(): void
+    {
+        $literal = 'private registration value';
+
+        try {
+            $this->mappingMetadataFactory->create(new MappingDefinition(
+                ConstantSource::class,
+                ConstantTarget::class,
+                [
+                    'unknown' => MapRule::constant($literal),
+                ],
+            ));
+            self::fail('Expected the unknown constant target parameter to be rejected.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString('Configured constant does not refer to a target constructor parameter.', $exception->getMessage());
+            self::assertStringNotContainsString($literal, $exception->getMessage());
+        }
+    }
+
+    public function testItDoesNotTreatAConstantAsMappingASameNamedPublicSourceProperty(): void
+    {
+        $this->assertCompilationFailsWithDefinition(new MappingDefinition(
+            SameNamedConstantSource::class,
+            ConstantTarget::class,
+            [
+                'value' => MapRule::constant('configured'),
+            ],
+        ), 'public source property $value is not mapped');
     }
 
     public function testItRejectsMissingRequiredAndInaccessibleMembers(): void
@@ -703,6 +818,46 @@ final class MappingMetadataFactoryTest extends TestCase
         $firstFingerprint     = $mappingMetadataFactory->create($parent)->parameters[0]->nestedMapping?->dependencyFingerprint;
         $registry->dependency = $secondChild;
         $secondFingerprint    = $mappingMetadataFactory->create($parent)->parameters[0]->nestedMapping?->dependencyFingerprint;
+
+        self::assertIsString($firstFingerprint);
+        self::assertIsString($secondFingerprint);
+        self::assertNotSame($firstFingerprint, $secondFingerprint);
+    }
+
+    public function testItIncludesTypeTaggedConstantsInNestedDependencyFingerprints(): void
+    {
+        $parent = new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+        $firstChild = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class, [
+            'value' => MapRule::constant('first'),
+        ], ['value']);
+        $secondChild = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class, [
+            'value' => MapRule::constant('second'),
+        ], ['value']);
+
+        $firstFingerprint  = $this->structuralFactory($firstChild, $parent)->create($parent)->parameters[0]->nestedMapping?->dependencyFingerprint;
+        $secondFingerprint = $this->structuralFactory($secondChild, $parent)->create($parent)->parameters[0]->nestedMapping?->dependencyFingerprint;
+
+        self::assertIsString($firstFingerprint);
+        self::assertIsString($secondFingerprint);
+        self::assertNotSame($firstFingerprint, $secondFingerprint);
+    }
+
+    public function testItFingerprintsNestedInvalidUtfEightConstants(): void
+    {
+        $parent = new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+        $firstChild = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class, [
+            'value' => MapRule::constant("\xff"),
+        ], ['value']);
+        $secondChild = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class, [
+            'value' => MapRule::constant("\xfe"),
+        ], ['value']);
+
+        $firstFingerprint  = $this->structuralFactory($firstChild, $parent)->create($parent)->parameters[0]->nestedMapping?->dependencyFingerprint;
+        $secondFingerprint = $this->structuralFactory($secondChild, $parent)->create($parent)->parameters[0]->nestedMapping?->dependencyFingerprint;
 
         self::assertIsString($firstFingerprint);
         self::assertIsString($secondFingerprint);

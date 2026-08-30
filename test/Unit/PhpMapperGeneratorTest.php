@@ -6,10 +6,13 @@ namespace Sirix\ObjectMapperTest\Unit;
 
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
+use Sirix\ObjectMapper\Generator\ConstantValueExporter;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
+use Sirix\ObjectMapper\Metadata\ConstantValueMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Metadata\NestedMappingMetadata;
@@ -22,6 +25,8 @@ use Sirix\ObjectMapperTest\Support\AlternativeRelease;
 use Sirix\ObjectMapperTest\Support\AlternativeReleaseDto;
 use Sirix\ObjectMapperTest\Support\AlternativeUuidToStringTransformer;
 use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
+use Sirix\ObjectMapperTest\Support\ConstantSource;
+use Sirix\ObjectMapperTest\Support\ConstantTarget;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
 use Sirix\ObjectMapperTest\Support\CustomChildDto;
@@ -33,6 +38,7 @@ use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodSource;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodTarget;
+use Sirix\ObjectMapperTest\Support\MixedConstantTarget;
 use Sirix\ObjectMapperTest\Support\NullableTokenHolderDto;
 use Sirix\ObjectMapperTest\Support\NullableTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\ProfileTarget;
@@ -49,11 +55,97 @@ use Sirix\ObjectMapperTest\Support\TokenHolderDto;
 use Sirix\ObjectMapperTest\Support\TokenHolderSource;
 use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
 
+use function array_unique;
+use function hash;
+use function json_encode;
 use function str_repeat;
 
 #[CoversClass(PhpMapperGenerator::class)]
 final class PhpMapperGeneratorTest extends TestCase
 {
+    public function testItExportsFixedSafeConstantLiterals(): void
+    {
+        $constantValueExporter = new ConstantValueExporter();
+
+        self::assertSame('null', $constantValueExporter->export(ConstantValueMetadata::fromValue(null)));
+        self::assertSame('false', $constantValueExporter->export(ConstantValueMetadata::fromValue(false)));
+        self::assertSame('-7', $constantValueExporter->export(ConstantValueMetadata::fromValue(-7)));
+        self::assertSame('1.0', $constantValueExporter->export(ConstantValueMetadata::fromValue(1.0)));
+        self::assertSame("'quote\\' slash\\\\ newline' . \"\\x0A\" . 'Unicode: ☃ control' . \"\\x01\" . ''", $constantValueExporter->export(ConstantValueMetadata::fromValue("quote' slash\\ newline\nUnicode: ☃ control\x01")));
+    }
+
+    public function testItEmitsConstantsBeforeSkippingSourceLessDefaultParameters(): void
+    {
+        $mappingMetadataFactory   = new MappingMetadataFactory();
+        $phpMapperGenerator       = new PhpMapperGenerator();
+        $mappingMetadata          = $mappingMetadataFactory->create(new MappingDefinition(
+            ConstantSource::class,
+            ConstantTarget::class,
+            [
+                'value' => MapRule::constant("quote'\\\n☃\x01"),
+            ],
+        ));
+        $key       = $phpMapperGenerator->cacheKey($mappingMetadata);
+        $generated = $phpMapperGenerator->generate($mappingMetadata, $key);
+
+        self::assertStringContainsString("value: 'quote\\'\\\\' . \"\\x0A\" . '☃' . \"\\x01\" . '',", $generated);
+        self::assertStringNotContainsString('$source->value', $generated);
+        self::assertStringNotContainsString('->transform(', $generated);
+        self::assertStringNotContainsString('mapNested(', $generated);
+        self::assertSame($generated, $phpMapperGenerator->generate($mappingMetadata, $key));
+    }
+
+    public function testItsCacheKeyDistinguishesConstantTypesAndInvalidatesFormatFour(): void
+    {
+        $mappingMetadataFactory   = new MappingMetadataFactory();
+        $phpMapperGenerator       = new PhpMapperGenerator();
+        $keys                     = [];
+        foreach ([0, false, '', null] as $value) {
+            $metadata = $mappingMetadataFactory->create(new MappingDefinition(
+                ConstantSource::class,
+                MixedConstantTarget::class,
+                [
+                    'value' => MapRule::constant($value),
+                ],
+            ));
+            $keys[] = $phpMapperGenerator->cacheKey($metadata);
+        }
+
+        self::assertCount(4, array_unique($keys));
+        $mappingMetadata            = $mappingMetadataFactory->create(new MappingDefinition(ConventionalSource::class, ConventionalTarget::class));
+        $reflectionMethod           = new ReflectionMethod(PhpMapperGenerator::class, 'normalizedMetadata');
+        $formatFour                 = $reflectionMethod->invoke($phpMapperGenerator, $mappingMetadata);
+        $formatFour['format']       = '4';
+
+        self::assertNotSame(
+            hash('sha256', json_encode($formatFour, JSON_THROW_ON_ERROR)),
+            $phpMapperGenerator->cacheKey($mappingMetadata),
+        );
+    }
+
+    public function testItsCacheKeySupportsInvalidUtfEightConstantStrings(): void
+    {
+        $mappingMetadataFactory           = new MappingMetadataFactory();
+        $phpMapperGenerator               = new PhpMapperGenerator();
+        $mappingMetadata                  = $mappingMetadataFactory->create(new MappingDefinition(
+            ConstantSource::class,
+            MixedConstantTarget::class,
+            [
+                'value' => MapRule::constant("\xff"),
+            ],
+        ));
+        $second = $mappingMetadataFactory->create(new MappingDefinition(
+            ConstantSource::class,
+            MixedConstantTarget::class,
+            [
+                'value' => MapRule::constant("\xfe"),
+            ],
+        ));
+
+        self::assertSame($phpMapperGenerator->cacheKey($mappingMetadata), $phpMapperGenerator->cacheKey($mappingMetadata));
+        self::assertNotSame($phpMapperGenerator->cacheKey($mappingMetadata), $phpMapperGenerator->cacheKey($second));
+    }
+
     public function testItGeneratesStableNamedArgumentCodeForIdenticalMetadata(): void
     {
         $mappingMetadata    = (new MappingMetadataFactory())->create(new MappingDefinition(ConventionalSource::class, ConventionalTarget::class));

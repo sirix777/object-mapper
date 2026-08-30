@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-30
+
+### Added
+
+- Closed `MapRule::constant()` registration for trusted `null`, `bool`, `int`,
+  finite `float`, and `string` target constructor values. Values are checked
+  against the declared target type during warmup without scalar coercion.
+- Type-tagged constant metadata and deterministic generated PHP literals.
+  Constant changes participate in root and conventional nested dependency
+  cache identity.
+
+### Changed
+
+- Generated-mapper cache format changed to `5`. Deploy code and registrations,
+  clear or rotate the stale owner-only cache directory, then warm the new cache
+  as its owner; format-4 files are not reused.
+- Constants do not select or ignore source members. Existing public-source
+  completeness checks remain in force.
+
+### Security
+
+- Generated code exports only validated fixed scalar/null literals. It does not
+  evaluate expressions, invoke callbacks, read source data for constants, or
+  perform service/container lookup.
+- No conditional mapping API shipped. Authorization, redaction, token handling,
+  decryption, I/O, and other policy remain explicit typed transformers or
+  application-owned custom mappers. Do not register secrets or request data as
+  constants because generated owner-only cache files contain those literals.
+
 ## [0.4.0] - 2026-08-29
 
 ### Added

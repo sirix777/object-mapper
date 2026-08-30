@@ -19,5 +19,6 @@ final readonly class TargetParameter
         public ReflectionClass $declaringClass,
         public ?TransformerMetadata $transformer = null,
         public ?NestedMappingMetadata $nestedMapping = null,
+        public ?ConstantValueMetadata $constant = null,
     ) {}
 }

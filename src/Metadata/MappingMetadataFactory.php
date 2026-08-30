@@ -207,19 +207,55 @@ final class MappingMetadataFactory
             foreach ($constructor->getParameters() as $reflectionParameter) {
                 $mapRule = $rules[$reflectionParameter->getName()] ?? null;
                 if ($reflectionParameter->isVariadic()) {
+                    $configuration = $mapRule instanceof MapRule
+                        ? ($mapRule->isConstant() ? 'Configured constant: ' : sprintf('Configured selector %s: ', $this->describeRule($mapRule)))
+                        : '';
+
                     throw new MappingCompilationFailed($this->message(
                         $source,
                         $target,
                         $reflectionParameter->getName(),
                         sprintf(
                             '%sVariadic target parameters are not supported.',
-                            $mapRule instanceof MapRule ? sprintf('Configured selector %s: ', $this->describeRule($mapRule)) : '',
+                            $configuration,
                         ),
                     ));
                 }
 
-                $sourceMember  = $this->findSourceMember($source, $target, $reflectionParameter, $mapRule);
                 $parameterType = $reflectionParameter->getType();
+                if ($mapRule instanceof MapRule && $mapRule->isConstant()) {
+                    if (! $parameterType instanceof ReflectionType) {
+                        throw new MappingCompilationFailed($this->message(
+                            $source,
+                            $target,
+                            $reflectionParameter->getName(),
+                            'Configured constant target parameter has no declared type.',
+                        ));
+                    }
+
+                    $constant = ConstantValueMetadata::fromValue($mapRule->constantValue());
+                    if (! $this->typeCompatibilityChecker->isConstantCompatible($constant, $parameterType, $constructor->getDeclaringClass())) {
+                        throw new MappingCompilationFailed($this->message(
+                            $source,
+                            $target,
+                            $reflectionParameter->getName(),
+                            sprintf('Configured constant is not assignable to target type %s.', $this->typeCompatibilityChecker->describe($parameterType, $constructor->getDeclaringClass())),
+                        ));
+                    }
+
+                    $parameters[] = new TargetParameter(
+                        $reflectionParameter->getName(),
+                        null,
+                        $reflectionParameter->isDefaultValueAvailable(),
+                        $parameterType,
+                        $constructor->getDeclaringClass(),
+                        constant: $constant,
+                    );
+
+                    continue;
+                }
+
+                $sourceMember  = $this->findSourceMember($source, $target, $reflectionParameter, $mapRule);
 
                 if (! $sourceMember instanceof SourceMember) {
                     if (! $reflectionParameter->isDefaultValueAvailable()) {
@@ -858,8 +894,6 @@ final class MappingMetadataFactory
                 foreach ($rules as $parameter => $rule) {
                     $ruleIdentity = [
                         'parameter'               => $parameter,
-                        'selectorKind'            => $rule->selectsProperty() ? 'property' : ($rule->selectsGetter() ? 'getter' : 'method'),
-                        'selector'                => $rule->selector(),
                         'operation'               => $rule->operation(),
                         'transformer'             => $rule->transformer(),
                         'transformerFileHash'     => $this->transformerFileHash($rule),
@@ -867,6 +901,12 @@ final class MappingMetadataFactory
                         'collectionElementSource' => $rule->collectionElementSource(),
                         'collectionElementTarget' => $rule->collectionElementTarget(),
                     ];
+                    if ($rule->isConstant()) {
+                        $ruleIdentity['constant'] = ConstantValueMetadata::fromValue($rule->constantValue())->identity();
+                    } else {
+                        $ruleIdentity['selectorKind'] = $rule->selectsProperty() ? 'property' : ($rule->selectsGetter() ? 'getter' : 'method');
+                        $ruleIdentity['selector']     = $rule->selector();
+                    }
                     if ($rule->isNested()) {
                         $ruleIdentity['dependency'] = $this->dependencyIdentity(
                             $this->structuralRuleDependency($source, $target, $parameter, $rule),
@@ -1135,8 +1175,9 @@ final class MappingMetadataFactory
                     $target,
                     $parameter,
                     sprintf(
-                        'Configured selector %s does not refer to a target constructor parameter.',
-                        $this->describeRule($mapRule),
+                        'Configured %s%s does not refer to a target constructor parameter.',
+                        $mapRule->isConstant() ? 'constant' : 'selector',
+                        $mapRule->isConstant() ? '' : ' ' . $this->describeRule($mapRule),
                     ),
                 ));
             }
@@ -1145,6 +1186,10 @@ final class MappingMetadataFactory
 
     private function describeRule(MapRule $mapRule): string
     {
+        if ($mapRule->isConstant()) {
+            return 'constant';
+        }
+
         return $mapRule->selectsProperty() ? '$' . $mapRule->selector() : $mapRule->selector() . '()';
     }
 

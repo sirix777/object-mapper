@@ -33,6 +33,8 @@ use Sirix\ObjectMapper\Runtime\ObjectMapper;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use Sirix\ObjectMapperTest\Support\AccessToken;
 use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
+use Sirix\ObjectMapperTest\Support\ConstantSource;
+use Sirix\ObjectMapperTest\Support\ConstantTarget;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
 use Sirix\ObjectMapperTest\Support\CustomChildDto;
@@ -53,6 +55,7 @@ use Sirix\ObjectMapperTest\Support\IndirectCycleSourceB;
 use Sirix\ObjectMapperTest\Support\IndirectCycleSourceC;
 use Sirix\ObjectMapperTest\Support\InvalidCustomMapperProvider;
 use Sirix\ObjectMapperTest\Support\MissingTarget;
+use Sirix\ObjectMapperTest\Support\MixedConstantTarget;
 use Sirix\ObjectMapperTest\Support\NameTarget;
 use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionDto;
 use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionSource;
@@ -70,6 +73,8 @@ use Sirix\ObjectMapperTest\Support\ReleaseCollectionDto;
 use Sirix\ObjectMapperTest\Support\ReleaseCollectionSource;
 use Sirix\ObjectMapperTest\Support\ReleaseDto;
 use Sirix\ObjectMapperTest\Support\RulePrecedenceSource;
+use Sirix\ObjectMapperTest\Support\SameNamedConstantSource;
+use Sirix\ObjectMapperTest\Support\ScalarConstantsTarget;
 use Sirix\ObjectMapperTest\Support\SelfCycleDto;
 use Sirix\ObjectMapperTest\Support\SelfCycleSource;
 use Sirix\ObjectMapperTest\Support\ServiceDependentProviderCustomMapper;
@@ -94,6 +99,7 @@ use function array_map;
 use function bin2hex;
 use function chmod;
 use function count;
+use function file_get_contents;
 use function fileperms;
 use function glob;
 use function hash;
@@ -167,6 +173,92 @@ final class ObjectMapperTest extends TestCase
         ;
 
         self::assertSame('default', $defaultTarget->label);
+    }
+
+    public function testItMapsConstantsFromFreshAndWarmedCachesWithoutReadingTheSource(): void
+    {
+        $mappingDefinition = new MappingDefinition(
+            ConstantSource::class,
+            MixedConstantTarget::class,
+            [
+                'value' => MapRule::constant("configured\n☃"),
+            ],
+        );
+
+        $mixedConstantTarget = $this->mapper(true, $mappingDefinition)->map(new ConstantSource(), MixedConstantTarget::class);
+        self::assertSame("configured\n☃", $mixedConstantTarget->value);
+
+        $this->mapper(false, $mappingDefinition)->warmup();
+        $warmed = $this->mapper(false, $mappingDefinition)->map(new ConstantSource(), MixedConstantTarget::class);
+        self::assertSame("configured\n☃", $warmed->value);
+
+        $cacheFiles = glob($this->cacheDirectory . '/Mapper_*.php') ?: [];
+        self::assertCount(1, $cacheFiles);
+        self::assertSame(0o600, fileperms($cacheFiles[0]) & 0o777);
+        self::assertStringContainsString("value: 'configured' . \"\\x0A\" . '☃',", (string) file_get_contents($cacheFiles[0]));
+    }
+
+    public function testItMapsTheConstantValueMatrixWithoutCollaborators(): void
+    {
+        $mappingDefinition = new MappingDefinition(
+            ConstantSource::class,
+            ScalarConstantsTarget::class,
+            [
+                'nullable' => MapRule::constant(null),
+                'enabled'  => MapRule::constant(false),
+                'rank'     => MapRule::constant(-7),
+                'ratio'    => MapRule::constant(1.5),
+                'label'    => MapRule::constant('configured'),
+                'union'    => MapRule::constant(42),
+            ],
+        );
+        $recordingCustomChildMapper     = new RecordingCustomChildMapper();
+        $recordingCustomMapperProvider  = new RecordingCustomMapperProvider([]);
+        $objectMapper                   = $this->mapperWithProvider(
+            true,
+            $recordingCustomMapperProvider,
+            $mappingDefinition,
+            new CustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, $recordingCustomChildMapper),
+        );
+
+        $fresh = $objectMapper->map(new ConstantSource(), ScalarConstantsTarget::class);
+        self::assertNull($fresh->nullable);
+        self::assertFalse($fresh->enabled);
+        self::assertSame(-7, $fresh->rank);
+        self::assertSame(1.5, $fresh->ratio);
+        self::assertSame('configured', $fresh->label);
+        self::assertSame(42, $fresh->union);
+        self::assertSame(0, $recordingCustomMapperProvider->lookups);
+        self::assertSame(0, $recordingCustomChildMapper->invocations);
+
+        $warmedMapper = $this->mapperWithProvider(
+            false,
+            $recordingCustomMapperProvider,
+            $mappingDefinition,
+            new CustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, $recordingCustomChildMapper),
+        );
+        $warmedMapper->warmup();
+        $scalarConstantsTarget = $warmedMapper->map(new ConstantSource(), ScalarConstantsTarget::class);
+        self::assertEquals($fresh, $scalarConstantsTarget);
+        self::assertSame(0, $recordingCustomMapperProvider->lookups);
+        self::assertSame(0, $recordingCustomChildMapper->invocations);
+
+        $withoutTransformer = $this->mapperWithTransformers(
+            true,
+            new ValueTransformerRegistry([new ThrowingTransformer()]),
+            $mappingDefinition,
+        )->map(new ConstantSource(), ScalarConstantsTarget::class);
+        self::assertEquals($fresh, $withoutTransformer);
+
+        $constantTarget = $this->mapper(true, new MappingDefinition(
+            SameNamedConstantSource::class,
+            ConstantTarget::class,
+            [
+                'value' => MapRule::constant('configured'),
+            ],
+            ['value'],
+        ))->map(new SameNamedConstantSource('source value'), ConstantTarget::class);
+        self::assertSame('configured', $constantTarget->value);
     }
 
     public function testItRejectsUnregisteredPairs(): void

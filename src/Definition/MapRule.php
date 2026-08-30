@@ -10,6 +10,11 @@ use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
 
 use function class_exists;
 use function is_a;
+use function is_bool;
+use function is_finite;
+use function is_float;
+use function is_int;
+use function is_string;
 use function preg_match;
 use function sprintf;
 use function str_starts_with;
@@ -23,6 +28,8 @@ final readonly class MapRule
 
     private const METHOD = 'method';
 
+    private const CONSTANT = 'constant';
+
     private const DIRECT = 'direct';
 
     private const TRANSFORM = 'transform';
@@ -32,13 +39,13 @@ final readonly class MapRule
     private const COLLECTION = 'collection';
 
     /**
-     * @param null|class-string<ValueTransformerInterface> $transformer
-     * @param 'collection'|'direct'|'nested'|'transform'   $operation
-     * @param null|class-string                            $nestedTarget
-     * @param null|class-string                            $collectionElementSource
-     * @param null|class-string                            $collectionElementTarget
+     * @param null|class-string<ValueTransformerInterface>          $transformer
+     * @param 'collection'|'constant'|'direct'|'nested'|'transform' $operation
+     * @param null|class-string                                     $nestedTarget
+     * @param null|class-string                                     $collectionElementSource
+     * @param null|class-string                                     $collectionElementTarget
      */
-    private function __construct(private string $selector, private string $kind, private ?string $transformer = null, private string $operation = self::DIRECT, private ?string $nestedTarget = null, private ?string $collectionElementSource = null, private ?string $collectionElementTarget = null) {}
+    private function __construct(private ?string $selector, private string $kind, private ?string $transformer = null, private string $operation = self::DIRECT, private ?string $nestedTarget = null, private ?string $collectionElementSource = null, private ?string $collectionElementTarget = null, private bool|float|int|string|null $constantValue = null) {}
 
     public static function from(string $property): self
     {
@@ -63,6 +70,13 @@ final readonly class MapRule
         self::assertIdentifier($method, 'method');
 
         return new self($method, self::METHOD);
+    }
+
+    public static function constant(mixed $value): self
+    {
+        self::assertConstantValue($value);
+
+        return new self(null, self::CONSTANT, operation: self::CONSTANT, constantValue: $value);
     }
 
     /**
@@ -110,7 +124,25 @@ final readonly class MapRule
 
     public function selector(): string
     {
+        if (null === $this->selector) {
+            throw new InvalidArgumentException('A constant mapping rule does not select a source member.');
+        }
+
         return $this->selector;
+    }
+
+    public function isConstant(): bool
+    {
+        return self::CONSTANT === $this->kind;
+    }
+
+    public function constantValue(): bool|float|int|string|null
+    {
+        if (! $this->isConstant()) {
+            throw new InvalidArgumentException('Only constant mapping rules have a constant value.');
+        }
+
+        return $this->constantValue;
     }
 
     public function selectsProperty(): bool
@@ -133,7 +165,7 @@ final readonly class MapRule
         return self::TRANSFORM === $this->operation;
     }
 
-    /** @return 'collection'|'direct'|'nested'|'transform' */
+    /** @return 'collection'|'constant'|'direct'|'nested'|'transform' */
     public function operation(): string
     {
         return $this->operation;
@@ -227,6 +259,15 @@ final readonly class MapRule
         if (1 !== preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/D', $identifier)) {
             throw new InvalidArgumentException(sprintf('Mapping rule %s "%s" must be a valid identifier.', $kind, $identifier));
         }
+    }
+
+    private static function assertConstantValue(mixed $value): void
+    {
+        if (null === $value || is_bool($value) || is_int($value) || is_string($value) || (is_float($value) && is_finite($value))) {
+            return;
+        }
+
+        throw new InvalidArgumentException('Mapping rule constants must be null, bool, int, finite float, or string.');
     }
 
     private function assertClassName(string $class, string $role): void

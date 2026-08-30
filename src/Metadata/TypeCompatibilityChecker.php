@@ -16,6 +16,7 @@ use Traversable;
 use function array_map;
 use function array_push;
 use function class_exists;
+use function count;
 use function implode;
 use function interface_exists;
 use function is_a;
@@ -62,6 +63,42 @@ final class TypeCompatibilityChecker
             static fn (array $clause): string => implode('&', $clause),
             $clauses,
         ));
+    }
+
+    /** @param ReflectionClass<object> $reflectionClass */
+    public function isConstantCompatible(ConstantValueMetadata $constantValueMetadata, ReflectionType $reflectionType, ReflectionClass $reflectionClass): bool
+    {
+        foreach ($this->toDnf($reflectionType, $reflectionClass) as $clause) {
+            if (1 !== count($clause)) {
+                continue;
+            }
+
+            if ($this->constantIsAssignableTo($constantValueMetadata, $clause[0])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function constantIsAssignableTo(ConstantValueMetadata $constantValueMetadata, string $target): bool
+    {
+        if ('mixed' === $target) {
+            return true;
+        }
+
+        return match ($constantValueMetadata->kind) {
+            'null'   => 'null' === $target,
+            'bool'   => match ($target) {
+                'bool'  => true,
+                'true'  => true === $constantValueMetadata->value,
+                'false' => false === $constantValueMetadata->value,
+                default => false,
+            },
+            'int'    => 'int' === $target,
+            'float'  => 'float' === $target,
+            'string' => 'string' === $target,
+        };
     }
 
     /**

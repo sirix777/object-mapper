@@ -15,11 +15,89 @@ use Sirix\ObjectMapperTest\Support\Release;
 use Sirix\ObjectMapperTest\Support\ReleaseDto;
 use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
 
+use stdClass;
+
 use function class_alias;
+use function fclose;
+use function fopen;
 
 #[CoversClass(MapRule::class)]
 final class MapRuleTest extends TestCase
 {
+    public function testItDescribesConstantRules(): void
+    {
+        foreach ([null, true, 42, 1.5, 'external'] as $value) {
+            $rule = MapRule::constant($value);
+
+            self::assertTrue($rule->isConstant());
+            self::assertSame($value, $rule->constantValue());
+            self::assertFalse($rule->selectsProperty());
+            self::assertFalse($rule->selectsGetter());
+            self::assertFalse($rule->selectsMethod());
+            self::assertSame('constant', $rule->operation());
+        }
+    }
+
+    public function testItRejectsInvalidConstantValuesWithoutDisclosingThem(): void
+    {
+        $resource = fopen('php://memory', 'r');
+        if (false === $resource) {
+            self::fail('Could not open the harmless test stream.');
+        }
+
+        try {
+            foreach ([[],
+                new stdClass(),
+                static fn (): string => 'not allowed',
+                $resource,
+                NAN,
+                INF,
+                -INF] as $value) {
+                try {
+                    MapRule::constant($value);
+                    self::fail('Expected an invalid constant value to be rejected.');
+                } catch (InvalidArgumentException $exception) {
+                    self::assertSame('Mapping rule constants must be null, bool, int, finite float, or string.', $exception->getMessage());
+                }
+            }
+        } finally {
+            fclose($resource);
+        }
+    }
+
+    public function testConstantAndSelectorAccessorsAreMutuallyExclusive(): void
+    {
+        try {
+            MapRule::constant('external')->selector();
+            self::fail('Expected a constant rule selector lookup to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame('A constant mapping rule does not select a source member.', $exception->getMessage());
+        }
+
+        try {
+            MapRule::from('source')->constantValue();
+            self::fail('Expected a selector rule constant lookup to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame('Only constant mapping rules have a constant value.', $exception->getMessage());
+        }
+    }
+
+    public function testItRejectsConstantTerminalOperationCombinations(): void
+    {
+        foreach ([
+            static fn () => MapRule::constant('external')->through(UuidToStringTransformer::class),
+            static fn () => MapRule::constant('external')->nested(ApiAccessTokenDto::class),
+            static fn () => MapRule::constant('external')->collection(Release::class, ReleaseDto::class),
+        ] as $configure) {
+            try {
+                $configure();
+                self::fail('Expected an incompatible constant terminal operation to be rejected.');
+            } catch (InvalidArgumentException $exception) {
+                self::assertStringContainsString('terminal operation', $exception->getMessage());
+            }
+        }
+    }
+
     public function testItDescribesNestedAndCollectionOperations(): void
     {
         $nested     = MapRule::from('token')->nested(ApiAccessTokenDto::class);
