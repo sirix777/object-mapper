@@ -14,6 +14,7 @@ use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
@@ -35,6 +36,10 @@ use Sirix\ObjectMapperTest\Support\CustomChildDto;
 use Sirix\ObjectMapperTest\Support\CustomChildHolderDto;
 use Sirix\ObjectMapperTest\Support\CustomChildHolderSource;
 use Sirix\ObjectMapperTest\Support\CustomChildSource;
+use Sirix\ObjectMapperTest\Support\CycleProxyEntity;
+use Sirix\ObjectMapperTest\Support\CycleProxyEntityDto;
+use Sirix\ObjectMapperTest\Support\CycleProxyHolder;
+use Sirix\ObjectMapperTest\Support\CycleProxyHolderDto;
 use Sirix\ObjectMapperTest\Support\DateTimeToAtomTransformer;
 use Sirix\ObjectMapperTest\Support\DefaultConstantTarget;
 use Sirix\ObjectMapperTest\Support\DefaultNestedTokenHolderDto;
@@ -117,6 +122,42 @@ final class MappingMetadataFactoryTest extends TestCase
     protected function setUp(): void
     {
         $this->mappingMetadataFactory = new MappingMetadataFactory();
+    }
+
+    public function testItCarriesTheEffectiveSourceMatchIntoRootAndNestedMetadata(): void
+    {
+        $child = new MappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            sourceMatch: SourceMatchMode::CycleProxy,
+        );
+        $parent = new MappingDefinition(CycleProxyHolder::class, CycleProxyHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CycleProxyEntityDto::class),
+        ]);
+        $mappingMetadata = $this->structuralFactory($child, $parent)->create($parent);
+
+        self::assertSame(SourceMatchMode::Exact, $mappingMetadata->sourceMatch);
+        self::assertSame(SourceMatchMode::CycleProxy, $mappingMetadata->parameters[0]->nestedMapping?->sourceMatch);
+    }
+
+    public function testItChangesNestedDependencyIdentityWhenOnlySourceMatchModeChanges(): void
+    {
+        $mappingDefinition = new MappingDefinition(CycleProxyHolder::class, CycleProxyHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CycleProxyEntityDto::class),
+        ]);
+        $mappingMetadata = $this->structuralFactory(
+            new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class),
+            $mappingDefinition,
+        )->create($mappingDefinition);
+        $proxyMetadata = $this->structuralFactory(
+            new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class, sourceMatch: SourceMatchMode::CycleProxy),
+            $mappingDefinition,
+        )->create($mappingDefinition);
+
+        self::assertNotSame(
+            $mappingMetadata->parameters[0]->nestedMapping?->dependencyFingerprint,
+            $proxyMetadata->parameters[0]->nestedMapping?->dependencyFingerprint,
+        );
     }
 
     public function testItResolvesPublicPropertiesInConstructorOrder(): void
@@ -714,6 +755,7 @@ final class MappingMetadataFactoryTest extends TestCase
             'kind'                    => 'custom',
             'sourceFileHash'          => $fixtureHash,
             'targetFileHash'          => $fixtureHash,
+            'sourceMatch'             => 'Exact',
             'mapperClass'             => InheritedCustomChildMapper::class,
             'mapperFileHash'          => $fixtureHash,
             'mapperMapMethodFileHash' => $methodHash,
@@ -754,6 +796,7 @@ final class MappingMetadataFactoryTest extends TestCase
             'kind'           => 'provider_custom',
             'sourceFileHash' => $fixtureHash,
             'targetFileHash' => $fixtureHash,
+            'sourceMatch'    => 'Exact',
             'mapperId'       => 'custom-child-v1',
         ], JSON_THROW_ON_ERROR)), $firstFingerprint);
         self::assertNotSame($firstFingerprint, $secondFingerprint);
@@ -787,6 +830,7 @@ final class MappingMetadataFactoryTest extends TestCase
             'kind'           => 'provider_custom',
             'sourceFileHash' => $fixtureHash,
             'targetFileHash' => $fixtureHash,
+            'sourceMatch'    => 'Exact',
             'mapperId'       => 'release-collection-v1',
         ], JSON_THROW_ON_ERROR)), $collectionMapping->dependencyFingerprint);
     }

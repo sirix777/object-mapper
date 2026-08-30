@@ -21,7 +21,7 @@ use function str_replace;
 /** @internal */
 final class PhpMapperGenerator
 {
-    private const FORMAT_VERSION = '5';
+    private const FORMAT_VERSION = '6';
 
     public function cacheKey(MappingMetadata $mappingMetadata): string
     {
@@ -67,13 +67,15 @@ final class PhpMapperGenerator
                 $nested           = $parameter->nestedMapping;
                 $dependencySource = $this->classToken($nested->source);
                 $dependencyTarget = $this->classToken($nested->target);
+                $sourceMatch      = '\Sirix\ObjectMapper\Definition\SourceMatchMode::' . $nested->sourceMatch->name;
 
                 if ('nested' === $nested->operation) {
                     $dispatch = sprintf(
-                        '$this->nestedMappings->mapNested(%s, %s::class, %s::class)',
+                        '$this->nestedMappings->mapNested(%s, %s::class, %s::class, %s)',
                         $expression,
                         $dependencySource,
                         $dependencyTarget,
+                        $sourceMatch,
                     );
                     if ($nested->nullable) {
                         $temporary    = '$nestedValue' . $index;
@@ -92,6 +94,7 @@ final class PhpMapperGenerator
                         $parameter->name,
                         $elementSource,
                         $dependencyTarget,
+                        $sourceMatch,
                     );
                     $mapped     = sprintf('$this->%s(%s)', $method, $expression);
                     if ($nested->nullable) {
@@ -111,9 +114,10 @@ final class PhpMapperGenerator
             );
         }
 
-        $source = $this->classToken($mappingMetadata->source);
-        $target = $this->classToken($mappingMetadata->target);
-        $class  = 'Mapper_' . $cacheKey;
+        $source      = $this->classToken($mappingMetadata->source);
+        $target      = $this->classToken($mappingMetadata->target);
+        $class       = 'Mapper_' . $cacheKey;
+        $sourceMatch = '\Sirix\ObjectMapper\Definition\SourceMatchMode::' . $mappingMetadata->sourceMatch->name;
 
         return "<?php\n\n"
             . "declare(strict_types=1);\n\n"
@@ -126,7 +130,7 @@ final class PhpMapperGenerator
             . "    ) {}\n\n"
             . "    public function map(object \$source): object\n"
             . "    {\n"
-            . "        if (\$source::class !== {$source}::class) {\n"
+            . "        if (!\\Sirix\\ObjectMapper\\Runtime\\SourceMatcher::matches(\$source, {$source}::class, {$sourceMatch})) {\n"
             . "            throw new \\InvalidArgumentException('Expected an instance of {$source}.');\n"
             . "        }\n\n"
             . implode("\n", $statements)
@@ -139,7 +143,7 @@ final class PhpMapperGenerator
             . "}\n";
     }
 
-    private function collectionMethod(string $method, string $source, string $target, string $parameter, string $elementSource, string $elementTarget): string
+    private function collectionMethod(string $method, string $source, string $target, string $parameter, string $elementSource, string $elementTarget, string $sourceMatch): string
     {
         $parameter   = addslashes($parameter);
         $sourceClass = $this->classToken($source);
@@ -150,7 +154,7 @@ final class PhpMapperGenerator
             . "    {\n"
             . "        \$mapped = [];\n"
             . "        foreach (\$values as \$key => \$element) {\n"
-            . "            if (!is_object(\$element) || \$element::class !== {$elementSource}::class) {\n"
+            . "            if (!is_object(\$element) || !\\Sirix\\ObjectMapper\\Runtime\\SourceMatcher::matches(\$element, {$elementSource}::class, {$sourceMatch})) {\n"
             . "                \$this->nestedMappings->collectionElementTypeFailure(\n"
             . "                    {$sourceClass}::class,\n"
             . "                    {$targetClass}::class,\n"
@@ -161,7 +165,7 @@ final class PhpMapperGenerator
             . "                );\n"
             . "            }\n"
             . "\n"
-            . "            \$mapped[] = \$this->nestedMappings->mapNested(\$element, {$elementSource}::class, {$elementTarget}::class);\n"
+            . "            \$mapped[] = \$this->nestedMappings->mapNested(\$element, {$elementSource}::class, {$elementTarget}::class, {$sourceMatch});\n"
             . "        }\n"
             . "\n"
             . "        return \$mapped;\n"
@@ -223,6 +227,7 @@ final class PhpMapperGenerator
                     'target'                => $parameter->nestedMapping->target,
                     'elementSource'         => $parameter->nestedMapping->elementSource,
                     'elementTarget'         => $parameter->nestedMapping->elementTarget,
+                    'sourceMatch'           => $parameter->nestedMapping->sourceMatch->name,
                     'dependencyFingerprint' => $parameter->nestedMapping->dependencyFingerprint,
                 ],
                 'constant'      => null === $parameter->constant ? null : $parameter->constant->identity(),
@@ -233,6 +238,7 @@ final class PhpMapperGenerator
             'format'         => self::FORMAT_VERSION,
             'source'         => $mappingMetadata->source,
             'target'         => $mappingMetadata->target,
+            'sourceMatch'    => $mappingMetadata->sourceMatch->name,
             'sourceFileHash' => $mappingMetadata->sourceFileHash,
             'targetFileHash' => $mappingMetadata->targetFileHash,
             'parameters'     => $parameters,

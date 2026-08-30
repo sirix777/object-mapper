@@ -10,6 +10,7 @@ use ReflectionMethod;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Generator\ConstantValueExporter;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
 use Sirix\ObjectMapper\Metadata\ConstantValueMetadata;
@@ -33,6 +34,8 @@ use Sirix\ObjectMapperTest\Support\CustomChildDto;
 use Sirix\ObjectMapperTest\Support\CustomChildHolderDto;
 use Sirix\ObjectMapperTest\Support\CustomChildHolderSource;
 use Sirix\ObjectMapperTest\Support\CustomChildSource;
+use Sirix\ObjectMapperTest\Support\CycleProxyEntity;
+use Sirix\ObjectMapperTest\Support\CycleProxyEntityDto;
 use Sirix\ObjectMapperTest\Support\DateTimeToAtomTransformer;
 use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
@@ -63,6 +66,36 @@ use function str_repeat;
 #[CoversClass(PhpMapperGenerator::class)]
 final class PhpMapperGeneratorTest extends TestCase
 {
+    public function testItGeneratesOnlyTheSharedMatcherForProxyEnabledMetadata(): void
+    {
+        $mappingMetadata = (new MappingMetadataFactory())->create(new MappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            sourceMatch: SourceMatchMode::CycleProxy,
+        ));
+        $generated = (new PhpMapperGenerator())->generate($mappingMetadata, str_repeat('a', 64));
+
+        self::assertStringContainsString('SourceMatcher::matches(', $generated);
+        self::assertStringContainsString('SourceMatchMode::CycleProxy', $generated);
+        self::assertStringNotContainsString('Cycle\ORM', $generated);
+        self::assertStringNotContainsString('instanceof \Sirix\ObjectMapperTest\Support\CycleProxyEntity', $generated);
+    }
+
+    public function testItsCacheKeyChangesWhenOnlyTheSourceMatchModeChanges(): void
+    {
+        $mappingMetadataFactory   = new MappingMetadataFactory();
+        $phpMapperGenerator       = new PhpMapperGenerator();
+
+        self::assertNotSame(
+            $phpMapperGenerator->cacheKey($mappingMetadataFactory->create(new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class))),
+            $phpMapperGenerator->cacheKey($mappingMetadataFactory->create(new MappingDefinition(
+                CycleProxyEntity::class,
+                CycleProxyEntityDto::class,
+                sourceMatch: SourceMatchMode::CycleProxy,
+            ))),
+        );
+    }
+
     public function testItExportsFixedSafeConstantLiterals(): void
     {
         $constantValueExporter = new ConstantValueExporter();
@@ -95,7 +128,7 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertSame($generated, $phpMapperGenerator->generate($mappingMetadata, $key));
     }
 
-    public function testItsCacheKeyDistinguishesConstantTypesAndInvalidatesFormatFour(): void
+    public function testItsCacheKeyDistinguishesConstantTypesAndInvalidatesFormatFive(): void
     {
         $mappingMetadataFactory   = new MappingMetadataFactory();
         $phpMapperGenerator       = new PhpMapperGenerator();
@@ -114,11 +147,11 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertCount(4, array_unique($keys));
         $mappingMetadata            = $mappingMetadataFactory->create(new MappingDefinition(ConventionalSource::class, ConventionalTarget::class));
         $reflectionMethod           = new ReflectionMethod(PhpMapperGenerator::class, 'normalizedMetadata');
-        $formatFour                 = $reflectionMethod->invoke($phpMapperGenerator, $mappingMetadata);
-        $formatFour['format']       = '4';
+        $formatFive                 = $reflectionMethod->invoke($phpMapperGenerator, $mappingMetadata);
+        $formatFive['format']       = '5';
 
         self::assertNotSame(
-            hash('sha256', json_encode($formatFour, JSON_THROW_ON_ERROR)),
+            hash('sha256', json_encode($formatFive, JSON_THROW_ON_ERROR)),
             $phpMapperGenerator->cacheKey($mappingMetadata),
         );
     }
@@ -156,7 +189,7 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertSame($phpMapperGenerator->generate($mappingMetadata, $key), $phpMapperGenerator->generate($mappingMetadata, $key));
         self::assertStringContainsString('new \Sirix\ObjectMapperTest\Support\ConventionalTarget(', $phpMapperGenerator->generate($mappingMetadata, $key));
         self::assertStringContainsString('id: $source->id,', $phpMapperGenerator->generate($mappingMetadata, $key));
-        self::assertStringContainsString('$source::class !== \Sirix\ObjectMapperTest\Support\ConventionalSource::class', $phpMapperGenerator->generate($mappingMetadata, $key));
+        self::assertStringContainsString('SourceMatcher::matches($source, \Sirix\ObjectMapperTest\Support\ConventionalSource::class, \Sirix\ObjectMapper\Definition\SourceMatchMode::Exact)', $phpMapperGenerator->generate($mappingMetadata, $key));
     }
 
     public function testItsCacheKeyChangesForDifferentMappingMetadata(): void
@@ -304,10 +337,10 @@ final class PhpMapperGeneratorTest extends TestCase
         $collectionCode = $phpMapperGenerator->generate($mappingMetadataFactory->create($collectionParent), $phpMapperGenerator->cacheKey($mappingMetadataFactory->create($collectionParent)));
 
         self::assertStringContainsString('NestedMappingRuntimeInterface $nestedMappings', $nestedCode);
-        self::assertStringContainsString('mapNested($source->token, \Sirix\ObjectMapperTest\Support\AccessToken::class, \Sirix\ObjectMapperTest\Support\ApiAccessTokenDto::class)', $nestedCode);
+        self::assertStringContainsString('mapNested($source->token, \Sirix\ObjectMapperTest\Support\AccessToken::class, \Sirix\ObjectMapperTest\Support\ApiAccessTokenDto::class, \Sirix\ObjectMapper\Definition\SourceMatchMode::Exact)', $nestedCode);
         self::assertStringContainsString('private function mapCollectionForParameter0(array $values): array', $collectionCode);
-        self::assertStringContainsString('$mapped[] = $this->nestedMappings->mapNested($element, \Sirix\ObjectMapperTest\Support\Release::class, \Sirix\ObjectMapperTest\Support\ReleaseDto::class);', $collectionCode);
-        self::assertStringContainsString('$element::class !== \Sirix\ObjectMapperTest\Support\Release::class', $collectionCode);
+        self::assertStringContainsString('$mapped[] = $this->nestedMappings->mapNested($element, \Sirix\ObjectMapperTest\Support\Release::class, \Sirix\ObjectMapperTest\Support\ReleaseDto::class, \Sirix\ObjectMapper\Definition\SourceMatchMode::Exact);', $collectionCode);
+        self::assertStringContainsString('SourceMatcher::matches($element, \Sirix\ObjectMapperTest\Support\Release::class, \Sirix\ObjectMapper\Definition\SourceMatchMode::Exact)', $collectionCode);
         self::assertStringContainsString('collectionElementTypeFailure(', $collectionCode);
     }
 

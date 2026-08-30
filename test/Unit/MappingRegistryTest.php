@@ -11,6 +11,7 @@ use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingNotRegistered;
 use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapperTest\Support\AbstractFixture;
@@ -71,6 +72,35 @@ final class MappingRegistryTest extends TestCase
         $this->expectExceptionMessage(CustomMappingDefinition::class);
 
         new MappingRegistry([$mappingDefinition, $customMappingDefinition]);
+    }
+
+    public function testItStoresExactSourceMatchingByDefaultAndRejectsModeOnlyDuplicates(): void
+    {
+        $exact = new MappingDefinition(DefaultSource::class, DefaultTarget::class);
+        $proxy = new MappingDefinition(DefaultSource::class, DefaultTarget::class, sourceMatch: SourceMatchMode::CycleProxy);
+
+        self::assertSame(SourceMatchMode::Exact, $exact->sourceMatch);
+        self::assertSame(SourceMatchMode::CycleProxy, $proxy->sourceMatch);
+
+        $this->expectException(InvalidArgumentException::class);
+        new MappingRegistry([$exact, $proxy]);
+    }
+
+    public function testItSupportsTrailingSourceMatchingForDirectCustomDefinitions(): void
+    {
+        $customMappingDefinition = new CustomMappingDefinition(
+            DefaultSource::class,
+            DefaultTarget::class,
+            new class implements CustomObjectMapperInterface {
+                public function map(object $source): object
+                {
+                    return new DefaultTarget(1);
+                }
+            },
+            SourceMatchMode::CycleProxy,
+        );
+
+        self::assertSame(SourceMatchMode::CycleProxy, $customMappingDefinition->sourceMatch);
     }
 
     public function testItRetrievesAndIteratesProviderBackedDefinitions(): void

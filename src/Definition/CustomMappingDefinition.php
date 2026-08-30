@@ -22,6 +22,7 @@ final readonly class CustomMappingDefinition implements MappingDefinitionInterfa
         private string $source,
         private string $target,
         public CustomObjectMapperInterface $mapper,
+        public SourceMatchMode $sourceMatch = SourceMatchMode::Exact,
     ) {
         $this->assertConcreteClass($source, 'source');
         $this->assertConcreteClass($target, 'target');

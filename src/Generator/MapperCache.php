@@ -12,6 +12,7 @@ use Sirix\ObjectMapper\Contract\ValueTransformerRegistryInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
@@ -19,6 +20,7 @@ use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Runtime\CustomMappingExecutor;
 use Sirix\ObjectMapper\Runtime\GeneratedMappingExecutionFailed;
 use Sirix\ObjectMapper\Runtime\NestedMappingRuntimeInterface;
+use Sirix\ObjectMapper\Runtime\SourceMatcher;
 use stdClass;
 use Throwable;
 
@@ -186,7 +188,7 @@ final class MapperCache implements NestedMappingRuntimeInterface
      * @param class-string $source
      * @param class-string $target
      */
-    public function mapNested(object $value, string $source, string $target): object
+    public function mapNested(object $value, string $source, string $target, SourceMatchMode $sourceMatchMode): object
     {
         if (! $this->mappingRegistry instanceof MappingRegistryInterface) {
             throw new MappingCompilationFailed(sprintf(
@@ -196,7 +198,7 @@ final class MapperCache implements NestedMappingRuntimeInterface
             ));
         }
 
-        if ($value::class !== $source) {
+        if (! SourceMatcher::matches($value, $source, $sourceMatchMode)) {
             throw new MappingExecutionFailed(sprintf(
                 'Nested mapping %s -> %s expected an exact %s source object.',
                 $source,

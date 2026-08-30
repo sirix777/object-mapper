@@ -11,8 +11,10 @@ use Sirix\ObjectMapper\Contract\ObjectMapperInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
+use Sirix\ObjectMapper\Exception\MappingNotRegistered;
 use Sirix\ObjectMapper\Generator\MapperCache;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Throwable;
@@ -27,6 +29,7 @@ use function array_unique;
 use function array_values;
 use function count;
 use function explode;
+use function get_parent_class;
 use function implode;
 use function ksort;
 use function preg_match;
@@ -55,7 +58,7 @@ final readonly class ObjectMapper implements ObjectMapperInterface
      */
     public function map(object $source, string $target): object
     {
-        $mappingDefinition = $this->mappingRegistry->get($source::class, $target);
+        $mappingDefinition = $this->definitionFor($source, $target);
 
         if ($mappingDefinition instanceof MappingDefinition) {
             $mapped = $this->mapperCache->map($mappingDefinition, $source);
@@ -100,6 +103,35 @@ final readonly class ObjectMapper implements ObjectMapperInterface
         }
 
         return $warmed;
+    }
+
+    /** @param class-string $target */
+    private function definitionFor(object $source, string $target): MappingDefinitionInterface
+    {
+        try {
+            return $this->mappingRegistry->get($source::class, $target);
+        } catch (MappingNotRegistered $original) {
+            $parent = get_parent_class($source);
+            if (false === $parent) {
+                throw $original;
+            }
+
+            if (! SourceMatcher::matches($source, $parent, SourceMatchMode::CycleProxy)) {
+                throw $original;
+            }
+
+            try {
+                $definition = $this->mappingRegistry->get($parent, $target);
+            } catch (MappingNotRegistered) {
+                throw $original;
+            }
+
+            if (! SourceMatcher::matches($source, $parent, SourceMatcher::modeFor($definition))) {
+                throw $original;
+            }
+
+            return $definition;
+        }
     }
 
     /** @return array<string, MappingDefinition> */

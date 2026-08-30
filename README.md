@@ -53,6 +53,48 @@ Register a pair once in application wiring. Mapping always uses the exact
 runtime source class and requested target class; an unregistered pair raises
 `MappingNotRegistered`.
 
+## Optional Cycle ORM direct-proxy matching
+
+Exact runtime-source matching remains the default. If an application has
+explicitly registered a Cycle ORM entity pair and wants to accept Cycle's
+runtime direct proxy for that entity too, opt in for that individual direct
+definition:
+
+```php
+use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
+use Sirix\ObjectMapper\Definition\MappingDefinition;
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
+
+new MappingDefinition(
+    Package::class,
+    PackageDto::class,
+    sourceMatch: SourceMatchMode::CycleProxy,
+);
+
+new CustomMappingDefinition(
+    Package::class,
+    PackageDto::class,
+    $packageMapper,
+    SourceMatchMode::CycleProxy,
+);
+```
+
+This does not enable general inheritance or polymorphic mapping. It accepts a
+concrete `Package` as usual, or only a value that implements Cycle's
+`EntityProxyInterface` and whose immediate parent is exactly `Package`.
+Normal subclasses, indirect proxies, and proxies for other entities remain
+rejected. `ProviderCustomMappingDefinition` remains exact-only.
+
+The package does not require Cycle ORM: the interface is detected at runtime
+only when this opt-in is selected. Mapping does not preload relations or alter
+Cycle lazy loading, so applications remain responsible for query preloading and
+avoiding N+1 queries before mapping.
+
+Generated-mapper cache format `6` includes this choice. When upgrading to
+`0.6.0`, deploy code and registrations, clear or rotate the old owner-only
+cache, create/use an owner-only (`0700`) cache directory, and warm it as the
+runtime owner. Generated files remain owner-only (`0600`).
+
 ## Customize a conventional mapping
 
 Keep DTOs independent of this package by defining exceptional source-member

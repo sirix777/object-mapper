@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-30
+
+### Added
+
+- `SourceMatchMode::CycleProxy` opt-in for direct `MappingDefinition` and
+  `CustomMappingDefinition` registrations. Direct entities keep mapping, while
+  only a direct Cycle `EntityProxyInterface` child of the registered source is
+  additionally accepted.
+
+### Changed
+
+- Generated-mapper cache format changed to `6`. Deploy `0.6.0` code and
+  registrations, clear or rotate the former owner-only cache, then warm the
+  new `0700` cache as the runtime owner. Format-5 files are not reused and
+  generated files remain `0600`.
+
+### Security
+
+- This is not generic polymorphic mapping. Provider-backed definitions remain
+  exact-only, Cycle is detected without a package dependency, and mapping does
+  not modify relation loading or application N+1-query responsibilities.
+
 ## [0.5.0] - 2026-08-30
 
 ### Added

@@ -18,6 +18,7 @@ use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
 use Sirix\ObjectMapper\Exception\MappingNotRegistered;
@@ -41,15 +42,26 @@ use Sirix\ObjectMapperTest\Support\CustomChildDto;
 use Sirix\ObjectMapperTest\Support\CustomChildHolderDto;
 use Sirix\ObjectMapperTest\Support\CustomChildHolderSource;
 use Sirix\ObjectMapperTest\Support\CustomChildSource;
+use Sirix\ObjectMapperTest\Support\CycleProxyCollectionHolder;
+use Sirix\ObjectMapperTest\Support\CycleProxyCollectionHolderDto;
+use Sirix\ObjectMapperTest\Support\CycleProxyEntity;
+use Sirix\ObjectMapperTest\Support\CycleProxyEntityDto;
+use Sirix\ObjectMapperTest\Support\CycleProxyHolder;
+use Sirix\ObjectMapperTest\Support\CycleProxyHolderDto;
+use Sirix\ObjectMapperTest\Support\CycleProxyRootWithChild;
+use Sirix\ObjectMapperTest\Support\CycleProxyRootWithChildDto;
 use Sirix\ObjectMapperTest\Support\DateTimeToAtomTransformer;
 use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
+use Sirix\ObjectMapperTest\Support\DirectCycleProxy;
+use Sirix\ObjectMapperTest\Support\DirectCycleProxyRootWithChild;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodSource;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodTarget;
 use Sirix\ObjectMapperTest\Support\IdTarget;
 use Sirix\ObjectMapperTest\Support\IndirectCycleDtoA;
 use Sirix\ObjectMapperTest\Support\IndirectCycleDtoB;
 use Sirix\ObjectMapperTest\Support\IndirectCycleDtoC;
+use Sirix\ObjectMapperTest\Support\IndirectCycleProxy;
 use Sirix\ObjectMapperTest\Support\IndirectCycleSourceA;
 use Sirix\ObjectMapperTest\Support\IndirectCycleSourceB;
 use Sirix\ObjectMapperTest\Support\IndirectCycleSourceC;
@@ -57,6 +69,9 @@ use Sirix\ObjectMapperTest\Support\InvalidCustomMapperProvider;
 use Sirix\ObjectMapperTest\Support\MissingTarget;
 use Sirix\ObjectMapperTest\Support\MixedConstantTarget;
 use Sirix\ObjectMapperTest\Support\NameTarget;
+use Sirix\ObjectMapperTest\Support\NormalCycleEntitySubclass;
+use Sirix\ObjectMapperTest\Support\NullableCycleProxyHolder;
+use Sirix\ObjectMapperTest\Support\NullableCycleProxyHolderDto;
 use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionDto;
 use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionSource;
 use Sirix\ObjectMapperTest\Support\NullableTokenHolderDto;
@@ -67,6 +82,7 @@ use Sirix\ObjectMapperTest\Support\ProfileTarget;
 use Sirix\ObjectMapperTest\Support\ProviderMapperLabelService;
 use Sirix\ObjectMapperTest\Support\RecordingCustomChildMapper;
 use Sirix\ObjectMapperTest\Support\RecordingCustomMapperProvider;
+use Sirix\ObjectMapperTest\Support\RecordingCycleProxyTransformer;
 use Sirix\ObjectMapperTest\Support\RecordingProviderCustomMapper;
 use Sirix\ObjectMapperTest\Support\Release;
 use Sirix\ObjectMapperTest\Support\ReleaseCollectionDto;
@@ -91,6 +107,7 @@ use Sirix\ObjectMapperTest\Support\TokenHolderDto;
 use Sirix\ObjectMapperTest\Support\TokenHolderSource;
 use Sirix\ObjectMapperTest\Support\Uuid;
 use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
+use Sirix\ObjectMapperTest\Support\WrongParentCycleProxy;
 use stdClass;
 use Throwable;
 
@@ -156,6 +173,351 @@ final class ObjectMapperTest extends TestCase
         $cacheFiles = glob($this->cacheDirectory . '/Mapper_*.php') ?: [];
         self::assertCount(1, $cacheFiles);
         self::assertSame(0o600, fileperms($cacheFiles[0]) & 0o777);
+    }
+
+    public function testItMapsOnlyDirectCycleProxiesForTheExplicitOptIn(): void
+    {
+        $mappingDefinition = new MappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            sourceMatch: SourceMatchMode::CycleProxy,
+        );
+        $mapper = $this->mapper(true, $mappingDefinition);
+
+        self::assertSame(1, $mapper->map(new CycleProxyEntity(1), CycleProxyEntityDto::class)->id);
+        self::assertSame(2, $mapper->map(new DirectCycleProxy(2), CycleProxyEntityDto::class)->id);
+    }
+
+    public function testItRejectsCycleProxiesUnlessTheDefinitionExplicitlyOptsIn(): void
+    {
+        $mapper = $this->mapper(true, new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class));
+
+        $this->expectException(MappingNotRegistered::class);
+        $mapper->map(new DirectCycleProxy(1), CycleProxyEntityDto::class);
+    }
+
+    public function testItRejectsProxiesBeforeConventionalTransformersOrCustomMappersRun(): void
+    {
+        RecordingCycleProxyTransformer::$invocations = 0;
+        $conventionalMapper                          = $this->mapperWithTransformers(
+            true,
+            new ValueTransformerRegistry([new RecordingCycleProxyTransformer()]),
+            new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class, [
+                'id' => MapRule::from('id')->through(RecordingCycleProxyTransformer::class),
+            ]),
+        );
+        $recordingCustomMapper = new class implements CustomObjectMapperInterface {
+            public int $invocations = 0;
+
+            public function map(object $source): object
+            {
+                ++$this->invocations;
+
+                return new CycleProxyEntityDto(1);
+            }
+        };
+        $customMapper = $this->mapper(true, new CustomMappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            $recordingCustomMapper,
+        ));
+
+        foreach ([$conventionalMapper, $customMapper] as $objectMapper) {
+            try {
+                $objectMapper->map(new DirectCycleProxy(1), CycleProxyEntityDto::class);
+                self::fail('Expected exact source matching to reject the proxy.');
+            } catch (MappingNotRegistered $mappingNotRegistered) {
+                self::assertInstanceOf(MappingNotRegistered::class, $mappingNotRegistered);
+            }
+        }
+
+        self::assertSame(0, RecordingCycleProxyTransformer::$invocations);
+        self::assertSame(0, $recordingCustomMapper->invocations);
+    }
+
+    public function testItRejectsNormalAndNonDirectCycleProxySubclasses(): void
+    {
+        $mapper = $this->mapper(true, new MappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            sourceMatch: SourceMatchMode::CycleProxy,
+        ));
+
+        foreach ([new NormalCycleEntitySubclass(1), new IndirectCycleProxy(2), new WrongParentCycleProxy(3)] as $value) {
+            try {
+                $mapper->map($value, CycleProxyEntityDto::class);
+                self::fail('Expected source matching to reject the value.');
+            } catch (MappingNotRegistered $mappingNotRegistered) {
+                self::assertInstanceOf(MappingNotRegistered::class, $mappingNotRegistered);
+            }
+        }
+    }
+
+    public function testItUsesTheSameOptInForDirectCustomRootMappings(): void
+    {
+        $mapper = $this->mapper(true, new CustomMappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            new class implements CustomObjectMapperInterface {
+                public function map(object $source): object
+                {
+                    if (! $source instanceof CycleProxyEntity) {
+                        throw new RuntimeException('Expected a Cycle proxy entity.');
+                    }
+
+                    return new CycleProxyEntityDto($source->id);
+                }
+            },
+            SourceMatchMode::CycleProxy,
+        ));
+
+        self::assertSame(3, $mapper->map(new DirectCycleProxy(3), CycleProxyEntityDto::class)->id);
+    }
+
+    public function testItPrioritizesAnExplicitDirectProxyRegistration(): void
+    {
+        $mapper = $this->mapper(true,
+            new CustomMappingDefinition(
+                CycleProxyEntity::class,
+                CycleProxyEntityDto::class,
+                new class implements CustomObjectMapperInterface {
+                    public function map(object $source): object
+                    {
+                        return new CycleProxyEntityDto(101);
+                    }
+                },
+                SourceMatchMode::CycleProxy,
+            ),
+            new MappingDefinition(DirectCycleProxy::class, CycleProxyEntityDto::class),
+        );
+
+        self::assertSame(1, $mapper->map(new DirectCycleProxy(1), CycleProxyEntityDto::class)->id);
+    }
+
+    public function testItKeepsProviderBackedDefinitionsExactOnlyForProxies(): void
+    {
+        $objectMapper = $this->mapperWithProvider(
+            false,
+            new RecordingCustomMapperProvider([]),
+            new ProviderCustomMappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class, 'provider'),
+        );
+
+        $this->expectException(MappingNotRegistered::class);
+        $objectMapper->map(new DirectCycleProxy(1), CycleProxyEntityDto::class);
+    }
+
+    public function testItRetainsTheRuntimePairFailureWhenTheLogicalParentPairIsMissing(): void
+    {
+        $mapper = $this->mapper(true, new MappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            sourceMatch: SourceMatchMode::CycleProxy,
+        ));
+
+        $this->expectException(MappingNotRegistered::class);
+        $mapper->map(new DirectCycleProxy(1), DefaultTarget::class);
+    }
+
+    public function testItDoesNotProbeAParentPairForAnOrdinarySubclass(): void
+    {
+        $mappingDefinition                = new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class);
+        $countingMappingRegistry          = new CountingMappingRegistry(new MappingRegistry([$mappingDefinition]));
+        $valueTransformerRegistry         = new ValueTransformerRegistry();
+        $objectMapper                     = new ObjectMapper(
+            $countingMappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $countingMappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                true,
+                $countingMappingRegistry,
+            ),
+        );
+
+        try {
+            $objectMapper->map(new NormalCycleEntitySubclass(1), CycleProxyEntityDto::class);
+            self::fail('Expected an unregistered runtime class.');
+        } catch (MappingNotRegistered) {
+            self::assertSame(1, $countingMappingRegistry->getCalls());
+        }
+    }
+
+    public function testItAppliesTheChildModeAtNestedAndCollectionBoundaries(): void
+    {
+        $child = new MappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            sourceMatch: SourceMatchMode::CycleProxy,
+        );
+        $nested = new MappingDefinition(CycleProxyHolder::class, CycleProxyHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CycleProxyEntityDto::class),
+        ]);
+        $collection = new MappingDefinition(CycleProxyCollectionHolder::class, CycleProxyCollectionHolderDto::class, [
+            'children' => MapRule::from('children')->collection(CycleProxyEntity::class, CycleProxyEntityDto::class),
+        ]);
+        $mapper = $this->mapper(true, $child, $nested, $collection);
+
+        self::assertSame(4, $mapper->map(new CycleProxyHolder(new DirectCycleProxy(4)), CycleProxyHolderDto::class)->child->id);
+        self::assertSame([5, 6], array_map(
+            static fn (CycleProxyEntityDto $cycleProxyEntityDto): int => $cycleProxyEntityDto->id,
+            $mapper->map(new CycleProxyCollectionHolder([new DirectCycleProxy(5), new CycleProxyEntity(6)]), CycleProxyCollectionHolderDto::class)->children,
+        ));
+    }
+
+    public function testItAppliesTheChildModeToDirectCustomAndNullableNestedMappings(): void
+    {
+        $customMappingDefinition = new CustomMappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            new class implements CustomObjectMapperInterface {
+                public function map(object $source): object
+                {
+                    if (! $source instanceof CycleProxyEntity) {
+                        throw new RuntimeException('Expected Cycle proxy entity.');
+                    }
+
+                    return new CycleProxyEntityDto($source->id);
+                }
+            },
+            SourceMatchMode::CycleProxy,
+        );
+        $nested = new MappingDefinition(CycleProxyHolder::class, CycleProxyHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CycleProxyEntityDto::class),
+        ]);
+        $nullable = new MappingDefinition(NullableCycleProxyHolder::class, NullableCycleProxyHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CycleProxyEntityDto::class),
+        ]);
+        $collection = new MappingDefinition(CycleProxyCollectionHolder::class, CycleProxyCollectionHolderDto::class, [
+            'children' => MapRule::from('children')->collection(CycleProxyEntity::class, CycleProxyEntityDto::class),
+        ]);
+        $mapper = $this->mapper(true, $customMappingDefinition, $nested, $nullable, $collection);
+
+        self::assertSame(7, $mapper->map(new CycleProxyHolder(new DirectCycleProxy(7)), CycleProxyHolderDto::class)->child->id);
+        self::assertNull($mapper->map(new NullableCycleProxyHolder(null), NullableCycleProxyHolderDto::class)->child);
+        $nullableCycleProxyHolderDto = $mapper->map(new NullableCycleProxyHolder(new DirectCycleProxy(8)), NullableCycleProxyHolderDto::class);
+        self::assertInstanceOf(CycleProxyEntityDto::class, $nullableCycleProxyHolderDto->child);
+        self::assertSame(8, $nullableCycleProxyHolderDto->child->id);
+        self::assertSame([8, 9], array_map(
+            static fn (CycleProxyEntityDto $cycleProxyEntityDto): int => $cycleProxyEntityDto->id,
+            $mapper->map(new CycleProxyCollectionHolder([new DirectCycleProxy(8), new CycleProxyEntity(9)]), CycleProxyCollectionHolderDto::class)->children,
+        ));
+    }
+
+    public function testItRejectsAnExactChildUnderAnOptInProxyRoot(): void
+    {
+        $child = new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class);
+        $root  = new MappingDefinition(
+            CycleProxyRootWithChild::class,
+            CycleProxyRootWithChildDto::class,
+            [
+                'child' => MapRule::from('child')->nested(CycleProxyEntityDto::class),
+            ],
+            sourceMatch: SourceMatchMode::CycleProxy,
+        );
+        $mapper = $this->mapper(true, $child, $root);
+
+        $this->expectException(MappingExecutionFailed::class);
+        $mapper->map(new DirectCycleProxyRootWithChild(new DirectCycleProxy(1)), CycleProxyRootWithChildDto::class);
+    }
+
+    public function testItRejectsWrongAndIndirectProxiesBeforeDirectCustomCollectionMapping(): void
+    {
+        $recordingCustomMapper = new class implements CustomObjectMapperInterface {
+            public int $invocations = 0;
+
+            public function map(object $source): object
+            {
+                ++$this->invocations;
+
+                return new CycleProxyEntityDto(1);
+            }
+        };
+        $customMappingDefinition = new CustomMappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            $recordingCustomMapper,
+            SourceMatchMode::CycleProxy,
+        );
+        $mappingDefinition = new MappingDefinition(CycleProxyCollectionHolder::class, CycleProxyCollectionHolderDto::class, [
+            'children' => MapRule::from('children')->collection(CycleProxyEntity::class, CycleProxyEntityDto::class),
+        ]);
+        $mapper       = $this->mapper(true, $customMappingDefinition, $mappingDefinition);
+        $createSource = static fn (mixed $children): CycleProxyCollectionHolder => new CycleProxyCollectionHolder($children);
+
+        foreach ([new WrongParentCycleProxy(1), new IndirectCycleProxy(2)] as $value) {
+            try {
+                $mapper->map($createSource([$value]), CycleProxyCollectionHolderDto::class);
+                self::fail('Expected rejected direct-custom collection element.');
+            } catch (MappingExecutionFailed $mappingExecutionFailed) {
+                self::assertStringContainsString($value::class, $mappingExecutionFailed->getMessage());
+            }
+        }
+
+        self::assertSame(0, $recordingCustomMapper->invocations);
+    }
+
+    public function testItRejectsANonNullProxyAtAnExactNullableNestedBoundary(): void
+    {
+        $child  = new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class);
+        $parent = new MappingDefinition(NullableCycleProxyHolder::class, NullableCycleProxyHolderDto::class, [
+            'child' => MapRule::from('child')->nested(CycleProxyEntityDto::class),
+        ]);
+        $mapper = $this->mapper(true, $child, $parent);
+
+        $this->expectException(MappingExecutionFailed::class);
+        $mapper->map(new NullableCycleProxyHolder(new DirectCycleProxy(1)), NullableCycleProxyHolderDto::class);
+    }
+
+    public function testItRetainsSafeCollectionDiagnosticsForARejectedProxyModeValue(): void
+    {
+        $child = new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class, sourceMatch: SourceMatchMode::CycleProxy);
+        $root  = new MappingDefinition(CycleProxyCollectionHolder::class, CycleProxyCollectionHolderDto::class, [
+            'children' => MapRule::from('children')->collection(CycleProxyEntity::class, CycleProxyEntityDto::class),
+        ]);
+        $mapper       = $this->mapper(true, $child, $root);
+        $createSource = static fn (mixed $children): CycleProxyCollectionHolder => new CycleProxyCollectionHolder($children);
+
+        foreach ([new NormalCycleEntitySubclass(1), new WrongParentCycleProxy(2), new IndirectCycleProxy(3)] as $value) {
+            try {
+                $mapper->map($createSource([
+                    'unsafe-key' => $value,
+                ]), CycleProxyCollectionHolderDto::class);
+                self::fail('Expected rejected collection element.');
+            } catch (MappingExecutionFailed $mappingExecutionFailed) {
+                self::assertStringContainsString('parameter "children"', $mappingExecutionFailed->getMessage());
+                self::assertStringContainsString($value::class, $mappingExecutionFailed->getMessage());
+                self::assertStringContainsString('string key sha256:', $mappingExecutionFailed->getMessage());
+                self::assertStringNotContainsString('unsafe-key', $mappingExecutionFailed->getMessage());
+            }
+        }
+    }
+
+    public function testItMapsProxyEnabledDefinitionsFromFreshAndWarmedCaches(): void
+    {
+        $mappingDefinition  = new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class, sourceMatch: SourceMatchMode::CycleProxy);
+        $objectMapper       = $this->mapper(true, $mappingDefinition);
+        self::assertSame(1, $objectMapper->map(new CycleProxyEntity(1), CycleProxyEntityDto::class)->id);
+        self::assertSame(2, $objectMapper->map(new DirectCycleProxy(2), CycleProxyEntityDto::class)->id);
+
+        $this->mapper(false, $mappingDefinition)->warmup();
+        $warmedMapper = $this->mapper(false, $mappingDefinition);
+        self::assertSame(3, $warmedMapper->map(new CycleProxyEntity(3), CycleProxyEntityDto::class)->id);
+        self::assertSame(4, $warmedMapper->map(new DirectCycleProxy(4), CycleProxyEntityDto::class)->id);
+    }
+
+    public function testItUsesDifferentCacheFilesForExactAndProxyEnabledDefinitions(): void
+    {
+        $this->mapper(true, new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class))
+            ->map(new CycleProxyEntity(1), CycleProxyEntityDto::class)
+        ;
+        $this->mapper(true, new MappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            sourceMatch: SourceMatchMode::CycleProxy,
+        ))->map(new CycleProxyEntity(1), CycleProxyEntityDto::class);
+
+        self::assertCount(2, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
     }
 
     public function testItRejectsProductionCacheMisses(): void
@@ -1618,6 +1980,40 @@ final class ObjectMapperTest extends TestCase
         }
     }
 
+    public function testItRejectsAStatefulRegistryReplacingOnlyAChildSourceMatchMode(): void
+    {
+        $child = new MappingDefinition(
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            sourceMatch: SourceMatchMode::CycleProxy,
+        );
+        $parent = new MappingDefinition(CycleProxyCollectionHolder::class, CycleProxyCollectionHolderDto::class, [
+            'children' => MapRule::from('children')->collection(CycleProxyEntity::class, CycleProxyEntityDto::class),
+        ]);
+        $statefulDependencyRegistry = new StatefulDependencyRegistry(
+            new MappingRegistry([$child, $parent]),
+            CycleProxyEntity::class,
+            CycleProxyEntityDto::class,
+            new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class),
+        );
+        $valueTransformerRegistry       = new ValueTransformerRegistry();
+        $objectMapper                   = new ObjectMapper(
+            $statefulDependencyRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $statefulDependencyRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                true,
+                $statefulDependencyRegistry,
+            ),
+        );
+
+        $this->expectException(MappingCompilationFailed::class);
+        $this->expectExceptionMessage('Nested mapping dependency does not match its compiled definition.');
+        $objectMapper->map(new CycleProxyCollectionHolder([new DirectCycleProxy(1)]), CycleProxyCollectionHolderDto::class);
+    }
+
     public function testItRejectsAStatefulRegistryReturningTheWrongPrecomputedPair(): void
     {
         $mappingDefinition          = new MappingDefinition(Release::class, ReleaseDto::class);
@@ -2508,6 +2904,7 @@ final readonly class UnrelatedNestedDispatchSource
             $createChild([new AccessToken('attacker-secret')]),
             UnrelatedChildSource::class,
             ReleaseCollectionDto::class,
+            SourceMatchMode::Exact,
         );
 
         return [];

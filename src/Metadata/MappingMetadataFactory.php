@@ -22,6 +22,7 @@ use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
+use Sirix\ObjectMapper\Runtime\SourceMatcher;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use stdClass;
 use Throwable;
@@ -133,7 +134,8 @@ final class MappingMetadataFactory
 
         return $binding === $mappingDefinition
             && $mappingDefinition->source() === $nestedMappingMetadata->source
-            && $mappingDefinition->target() === $nestedMappingMetadata->target;
+            && $mappingDefinition->target() === $nestedMappingMetadata->target
+            && SourceMatcher::modeFor($mappingDefinition) === $nestedMappingMetadata->sourceMatch;
     }
 
     /** @internal */
@@ -330,6 +332,7 @@ final class MappingMetadataFactory
                 $parameters,
                 $this->fileHash($source),
                 $this->fileHash($target),
+                SourceMatcher::modeFor($mappingDefinition),
             );
             $this->compiledMetadata[$key]                = $mappingMetadata;
             $this->dependencySnapshots[$mappingMetadata] = [
@@ -705,6 +708,7 @@ final class MappingMetadataFactory
                     $dependency->target(),
                     $sourceType['nullable'],
                     $dependencyFingerprint,
+                    sourceMatch: SourceMatcher::modeFor($dependency),
                 ),
                 $dependency,
             );
@@ -740,6 +744,7 @@ final class MappingMetadataFactory
                 $dependencyFingerprint,
                 $elementSource,
                 $elementTarget,
+                SourceMatcher::modeFor($dependency),
             ),
             $dependency,
         );
@@ -877,6 +882,7 @@ final class MappingMetadataFactory
                 'kind'           => $mappingDefinition instanceof ProviderCustomMappingDefinition ? 'provider_custom' : ($mappingDefinition instanceof CustomMappingDefinition ? 'custom' : 'conventional'),
                 'sourceFileHash' => $this->fileHash($source),
                 'targetFileHash' => $this->fileHash($target),
+                'sourceMatch'    => SourceMatcher::modeFor($mappingDefinition)->name,
             ];
 
             if ($mappingDefinition instanceof ProviderCustomMappingDefinition) {

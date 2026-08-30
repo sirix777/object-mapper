@@ -26,6 +26,7 @@ final readonly class MappingDefinition implements MappingDefinitionInterface
         public string $target,
         public array $rules = [],
         public array $ignoredSource = [],
+        public SourceMatchMode $sourceMatch = SourceMatchMode::Exact,
     ) {
         $this->assertConcreteClass($source, 'source');
         $this->assertConcreteClass($target, 'target');

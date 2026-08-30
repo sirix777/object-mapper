@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapper\Metadata;
 
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
+
 /** @internal */
 final readonly class NestedMappingMetadata
 {
@@ -22,5 +24,6 @@ final readonly class NestedMappingMetadata
         public string $dependencyFingerprint,
         public ?string $elementSource = null,
         public ?string $elementTarget = null,
+        public SourceMatchMode $sourceMatch = SourceMatchMode::Exact,
     ) {}
 }

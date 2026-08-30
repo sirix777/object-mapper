@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapper\Metadata;
 
+use Sirix\ObjectMapper\Definition\SourceMatchMode;
+
 /** @internal */
 final readonly class MappingMetadata
 {
@@ -16,5 +18,6 @@ final readonly class MappingMetadata
         public array $parameters,
         public ?string $sourceFileHash,
         public ?string $targetFileHash,
+        public SourceMatchMode $sourceMatch = SourceMatchMode::Exact,
     ) {}
 }
