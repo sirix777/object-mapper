@@ -5,11 +5,8 @@ declare(strict_types=1);
 namespace Sirix\ObjectMapper\Definition;
 
 use InvalidArgumentException;
-use ReflectionClass;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 
-use function class_exists;
-use function sprintf;
 use function trim;
 
 final readonly class ProviderCustomMappingDefinition implements MappingDefinitionInterface
@@ -23,8 +20,8 @@ final readonly class ProviderCustomMappingDefinition implements MappingDefinitio
         private string $target,
         private string $mapperId,
     ) {
-        $this->assertConcreteClass($source, 'source');
-        $this->assertConcreteClass($target, 'target');
+        DefinitionClassValidator::assertConcrete($source, 'source');
+        DefinitionClassValidator::assertConcrete($target, 'target');
 
         if ('' === trim($mapperId)) {
             throw new InvalidArgumentException('Custom mapper identifier must not be empty.');
@@ -51,18 +48,5 @@ final readonly class ProviderCustomMappingDefinition implements MappingDefinitio
     public function mapperId(): string
     {
         return $this->mapperId;
-    }
-
-    private function assertConcreteClass(string $class, string $role): void
-    {
-        if (! class_exists($class)) {
-            throw new InvalidArgumentException(sprintf('Mapping %s class "%s" does not exist.', $role, $class));
-        }
-
-        $reflectionClass = new ReflectionClass($class);
-
-        if ($reflectionClass->isInterface() || $reflectionClass->isAbstract()) {
-            throw new InvalidArgumentException(sprintf('Mapping %s class "%s" must be concrete.', $role, $class));
-        }
     }
 }

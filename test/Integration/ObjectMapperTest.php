@@ -6,6 +6,7 @@ namespace Sirix\ObjectMapperTest\Integration;
 
 use DateTimeImmutable;
 use Fiber;
+use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
@@ -14,6 +15,8 @@ use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
+use Sirix\ObjectMapper\Contract\ObjectMapperInterface;
+use Sirix\ObjectMapper\Contract\WarmableObjectMapperInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
@@ -109,12 +112,15 @@ use Sirix\ObjectMapperTest\Support\Uuid;
 use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
 use Sirix\ObjectMapperTest\Support\WrongParentCycleProxy;
 use stdClass;
+
 use Throwable;
 
 use function array_keys;
 use function array_map;
 use function bin2hex;
 use function chmod;
+use function class_alias;
+use function class_exists;
 use function count;
 use function file_get_contents;
 use function fileperms;
@@ -173,6 +179,14 @@ final class ObjectMapperTest extends TestCase
         $cacheFiles = glob($this->cacheDirectory . '/Mapper_*.php') ?: [];
         self::assertCount(1, $cacheFiles);
         self::assertSame(0o600, fileperms($cacheFiles[0]) & 0o777);
+    }
+
+    public function testItImplementsSeparateMappingAndWarmupContracts(): void
+    {
+        $mapper = $this->mapper(true);
+
+        self::assertInstanceOf(ObjectMapperInterface::class, $mapper);
+        self::assertInstanceOf(WarmableObjectMapperInterface::class, $mapper);
     }
 
     public function testItMapsOnlyDirectCycleProxiesForTheExplicitOptIn(): void
@@ -631,6 +645,25 @@ final class ObjectMapperTest extends TestCase
         $mapper->map(new ConventionalSource(1, 'Ada', true), ConventionalTarget::class);
     }
 
+    public function testItRejectsAliasesBeforeTheyCanCreateAnUnreachableExactPair(): void
+    {
+        $sourceAlias = 'SirixObjectMapperTestIntegrationAliasSource' . bin2hex(random_bytes(4));
+        $this->registerClassAlias(DefaultSource::class, $sourceAlias);
+
+        try {
+            new MappingDefinition($sourceAlias, DefaultTarget::class);
+            self::fail('Expected an aliased exact-pair source to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame(
+                'Mapping source class "' . $sourceAlias . '" must use its canonical class name "' . DefaultSource::class . '".',
+                $exception->getMessage(),
+            );
+        }
+
+        $mapper = $this->mapper(true, new MappingDefinition(DefaultSource::class, DefaultTarget::class));
+        self::assertSame('default', $mapper->map(new DefaultSource(1), DefaultTarget::class)->label);
+    }
+
     public function testWarmupIsIdempotent(): void
     {
         $mapper = $this->mapper(
@@ -639,8 +672,25 @@ final class ObjectMapperTest extends TestCase
             new MappingDefinition(DefaultSource::class, DefaultTarget::class),
         );
 
-        self::assertSame($mapper->warmup(), $mapper->warmup());
+        $expected = [
+            ConventionalSource::class . '->' . ConventionalTarget::class,
+            DefaultSource::class . '->' . DefaultTarget::class,
+        ];
+
+        self::assertSame($expected, $mapper->warmup());
+        self::assertSame($expected, $mapper->warmup());
         self::assertCount(2, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
+    }
+
+    public function testItRetainsFormatSixAndCanonicalDefinitionCacheBehavior(): void
+    {
+        $mappingDefinition = new MappingDefinition(DefaultSource::class, DefaultTarget::class);
+        $mapper            = $this->mapper(false, $mappingDefinition);
+
+        self::assertSame('6', (new ReflectionClass(PhpMapperGenerator::class))->getConstant('FORMAT_VERSION'));
+        self::assertSame(DefaultSource::class, $mappingDefinition->source());
+        self::assertSame([$mappingDefinition->key()], $mapper->warmup());
+        self::assertSame('default', $mapper->map(new DefaultSource(1), DefaultTarget::class)->label);
     }
 
     public function testItLoadsAProductionMapperWarmedByAnotherCacheInstance(): void
@@ -944,6 +994,21 @@ final class ObjectMapperTest extends TestCase
         $this->expectException(MappingExecutionFailed::class);
         $this->expectExceptionMessage(ConventionalSource::class . '->' . ConventionalTarget::class);
         $mapper->map(new ConventionalSource(7, 'Ada', true), ConventionalTarget::class);
+    }
+
+    public function testItRejectsForeignDefinitionImplementationsAtExecution(): void
+    {
+        $mapper = $this->mapper(true, new ForeignMappingDefinition());
+
+        try {
+            $mapper->map(new DefaultSource(1), DefaultTarget::class);
+            self::fail('Expected foreign definition execution to be rejected.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame(
+                'Mapping ' . DefaultSource::class . '->' . DefaultTarget::class . ' has an unsupported definition type ' . ForeignMappingDefinition::class . '.',
+                $exception->getMessage(),
+            );
+        }
     }
 
     public function testWarmupSkipsCustomMappings(): void
@@ -2293,6 +2358,20 @@ final class ObjectMapperTest extends TestCase
             ),
         );
     }
+
+    /**
+     * @param class-string $class
+     *
+     * @phpstan-assert class-string $alias
+     */
+    private function registerClassAlias(string $class, string $alias): void
+    {
+        class_alias($class, $alias);
+
+        if (! class_exists($alias)) {
+            self::fail('Could not register integration test class alias.');
+        }
+    }
 }
 
 class ExactChild
@@ -2694,6 +2773,24 @@ final class HostileMappingDefinition implements MappingDefinitionInterface
     public function key(): string
     {
         throw new RuntimeException('hostile-key-secret');
+    }
+}
+
+final class ForeignMappingDefinition implements MappingDefinitionInterface
+{
+    public function source(): string
+    {
+        return DefaultSource::class;
+    }
+
+    public function target(): string
+    {
+        return DefaultTarget::class;
+    }
+
+    public function key(): string
+    {
+        return DefaultSource::class . '->' . DefaultTarget::class;
     }
 }
 

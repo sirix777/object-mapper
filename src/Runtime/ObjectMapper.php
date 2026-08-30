@@ -7,7 +7,7 @@ namespace Sirix\ObjectMapper\Runtime;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
-use Sirix\ObjectMapper\Contract\ObjectMapperInterface;
+use Sirix\ObjectMapper\Contract\WarmableObjectMapperInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
@@ -36,7 +36,7 @@ use function preg_match;
 use function sort;
 use function sprintf;
 
-final readonly class ObjectMapper implements ObjectMapperInterface
+final readonly class ObjectMapper implements WarmableObjectMapperInterface
 {
     private CustomMappingExecutor $customMappingExecutor;
 

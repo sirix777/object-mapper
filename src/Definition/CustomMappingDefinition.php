@@ -4,13 +4,8 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapper\Definition;
 
-use InvalidArgumentException;
-use ReflectionClass;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
-
-use function class_exists;
-use function sprintf;
 
 final readonly class CustomMappingDefinition implements MappingDefinitionInterface
 {
@@ -24,8 +19,8 @@ final readonly class CustomMappingDefinition implements MappingDefinitionInterfa
         public CustomObjectMapperInterface $mapper,
         public SourceMatchMode $sourceMatch = SourceMatchMode::Exact,
     ) {
-        $this->assertConcreteClass($source, 'source');
-        $this->assertConcreteClass($target, 'target');
+        DefinitionClassValidator::assertConcrete($source, 'source');
+        DefinitionClassValidator::assertConcrete($target, 'target');
     }
 
     /** @return class-string */
@@ -43,18 +38,5 @@ final readonly class CustomMappingDefinition implements MappingDefinitionInterfa
     public function key(): string
     {
         return $this->source . '->' . $this->target;
-    }
-
-    private function assertConcreteClass(string $class, string $role): void
-    {
-        if (! class_exists($class)) {
-            throw new InvalidArgumentException(sprintf('Mapping %s class "%s" does not exist.', $role, $class));
-        }
-
-        $reflectionClass = new ReflectionClass($class);
-
-        if ($reflectionClass->isInterface() || $reflectionClass->isAbstract()) {
-            throw new InvalidArgumentException(sprintf('Mapping %s class "%s" must be concrete.', $role, $class));
-        }
     }
 }

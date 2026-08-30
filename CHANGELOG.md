@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-30
+
+### Added
+
+- `WarmableObjectMapperInterface`, an additive lifecycle contract for
+  deployment-time mapper cache warmup. `ObjectMapperInterface` remains
+  mapping-only for compatibility with application-owned implementations.
+
+### Changed
+
+- Built-in definitions now reject class aliases and require canonical class
+  names. Conventional mappings additionally require named concrete classes;
+  direct and provider-backed custom mappings retain anonymous concrete-class
+  support.
+- `MappingDefinitionInterface` is documented as a read/registry contract, not
+  an executable extension SPI. Custom execution remains available through a
+  direct `CustomObjectMapperInterface` mapper or a closed opaque provider ID.
+- Generated-mapper cache format remains `6`; this release does not change
+  generated source, cache identity, cache permissions, or cache loading.
+
 ## [0.6.0] - 2026-08-30
 
 ### Added

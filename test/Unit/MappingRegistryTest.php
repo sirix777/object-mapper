@@ -19,7 +19,12 @@ use Sirix\ObjectMapperTest\Support\DefaultSource;
 use Sirix\ObjectMapperTest\Support\DefaultTarget;
 use stdClass;
 
+use function bin2hex;
+use function class_alias;
+use function class_exists;
 use function iterator_to_array;
+use function random_bytes;
+use function sprintf;
 
 #[CoversClass(MappingRegistry::class)]
 #[CoversClass(ProviderCustomMappingDefinition::class)]
@@ -166,6 +171,110 @@ final class MappingRegistryTest extends TestCase
         new MappingDefinition(AbstractFixture::class, DefaultTarget::class);
     }
 
+    public function testItRejectsAliasesForEveryBuiltInDefinitionRole(): void
+    {
+        $sourceAlias = 'SirixObjectMapperTestDefinitionAliasSource' . bin2hex(random_bytes(4));
+        $targetAlias = 'SirixObjectMapperTestDefinitionAliasTarget' . bin2hex(random_bytes(4));
+        $this->registerClassAlias(DefaultSource::class, $sourceAlias);
+        $this->registerClassAlias(DefaultTarget::class, $targetAlias);
+
+        $definitions = [
+            MappingDefinition::class               => [
+                'source' => static fn (): MappingDefinition => new MappingDefinition($sourceAlias, DefaultTarget::class),
+                'target' => static fn (): MappingDefinition => new MappingDefinition(DefaultSource::class, $targetAlias),
+            ],
+            CustomMappingDefinition::class         => [
+                'source' => static fn (): CustomMappingDefinition => new CustomMappingDefinition($sourceAlias, DefaultTarget::class, new class implements CustomObjectMapperInterface {
+                    public function map(object $source): object
+                    {
+                        return new DefaultTarget(1);
+                    }
+                }),
+                'target' => static fn (): CustomMappingDefinition => new CustomMappingDefinition(DefaultSource::class, $targetAlias, new class implements CustomObjectMapperInterface {
+                    public function map(object $source): object
+                    {
+                        return new DefaultTarget(1);
+                    }
+                }),
+            ],
+            ProviderCustomMappingDefinition::class => [
+                'source' => static fn (): ProviderCustomMappingDefinition => new ProviderCustomMappingDefinition($sourceAlias, DefaultTarget::class, 'test-mapper'),
+                'target' => static fn (): ProviderCustomMappingDefinition => new ProviderCustomMappingDefinition(DefaultSource::class, $targetAlias, 'test-mapper'),
+            ],
+        ];
+
+        foreach ($definitions as $definitionClass => $definitionRoles) {
+            foreach ($definitionRoles as $role => $createDefinition) {
+                try {
+                    $createDefinition();
+                    self::fail(sprintf('Expected %s to reject an alias %s.', $definitionClass, $role));
+                } catch (InvalidArgumentException $exception) {
+                    self::assertSame(
+                        sprintf('Mapping %s class "%s" must use its canonical class name "%s".', $role, 'source' === $role ? $sourceAlias : $targetAlias, 'source' === $role ? DefaultSource::class : DefaultTarget::class),
+                        $exception->getMessage(),
+                        $definitionClass . ' ' . $role,
+                    );
+                }
+            }
+        }
+    }
+
+    public function testItRejectsAnonymousConventionalDefinitionsAndKeepsCustomDefinitionsUsable(): void
+    {
+        $anonymousSource = new class {};
+        $anonymousTarget = new class {};
+
+        foreach ([
+            'source' => [$anonymousSource::class, DefaultTarget::class],
+            'target' => [DefaultSource::class, $anonymousTarget::class],
+        ] as $role => [$source, $target]) {
+            try {
+                new MappingDefinition($source, $target);
+                self::fail(sprintf('Expected anonymous %s class to be rejected.', $role));
+            } catch (InvalidArgumentException $exception) {
+                self::assertStringContainsString('Mapping ' . $role . ' class "', $exception->getMessage());
+                self::assertStringContainsString('must be a named concrete class.', $exception->getMessage());
+            }
+        }
+
+        $customMappingDefinition = new CustomMappingDefinition(
+            $anonymousSource::class,
+            $anonymousTarget::class,
+            new class implements CustomObjectMapperInterface {
+                public function map(object $source): object
+                {
+                    return $source;
+                }
+            },
+        );
+        $providerCustomMappingDefinition = new ProviderCustomMappingDefinition(
+            $anonymousSource::class,
+            $anonymousTarget::class,
+            'test-mapper',
+        );
+
+        self::assertSame($anonymousSource::class, $customMappingDefinition->source());
+        self::assertSame($anonymousTarget::class, $customMappingDefinition->target());
+        self::assertSame($anonymousSource::class, $providerCustomMappingDefinition->source());
+        self::assertSame($anonymousTarget::class, $providerCustomMappingDefinition->target());
+    }
+
+    public function testItRejectsAliasesBeforeApplyingTheConventionalNamedClassRequirement(): void
+    {
+        $anonymousSource = new class {};
+        $sourceAlias     = 'SirixObjectMapperTestDefinitionAliasAnonymousSource' . bin2hex(random_bytes(4));
+        $this->registerClassAlias($anonymousSource::class, $sourceAlias);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(sprintf(
+            'Mapping source class "%s" must use its canonical class name "%s".',
+            $sourceAlias,
+            $anonymousSource::class,
+        ));
+
+        new MappingDefinition($sourceAlias, DefaultTarget::class);
+    }
+
     public function testItRejectsInvalidProviderBackedDefinitionSource(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -201,5 +310,19 @@ final class MappingRegistryTest extends TestCase
     private function invalidIgnoredSource(): mixed
     {
         return [new stdClass()];
+    }
+
+    /**
+     * @param class-string $class
+     *
+     * @phpstan-assert class-string $alias
+     */
+    private function registerClassAlias(string $class, string $alias): void
+    {
+        class_alias($class, $alias);
+
+        if (! class_exists($alias)) {
+            self::fail('Could not register definition test class alias.');
+        }
     }
 }

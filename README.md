@@ -16,6 +16,7 @@ The package requires PHP 8.2 or later and has no production dependencies.
 ## Register and map a pair
 
 ```php
+use Sirix\ObjectMapper\Contract\ObjectMapperInterface;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Generator\MapperCache;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
@@ -33,6 +34,7 @@ $transformers = new ValueTransformerRegistry([
     new DateTimeToAtom(),
 ]);
 
+/** @var ObjectMapperInterface $mapper */
 $mapper = new ObjectMapper(
     $registry,
     new MapperCache(
@@ -90,10 +92,8 @@ only when this opt-in is selected. Mapping does not preload relations or alter
 Cycle lazy loading, so applications remain responsible for query preloading and
 avoiding N+1 queries before mapping.
 
-Generated-mapper cache format `6` includes this choice. When upgrading to
-`0.6.0`, deploy code and registrations, clear or rotate the old owner-only
-cache, create/use an owner-only (`0700`) cache directory, and warm it as the
-runtime owner. Generated files remain owner-only (`0600`).
+Generated-mapper cache format `6` includes this choice. Release `0.7.0`
+retains format `6`; generated files remain owner-only (`0600`).
 
 ## Customize a conventional mapping
 
@@ -222,9 +222,13 @@ $registry = new MappingRegistry([
 ```
 
 Custom definitions have the same exact-pair registration and final target-type
-check as generated mappers. `warmup()` deliberately skips them and returns only
-the generated conventional mapping keys, so a custom mapper is never executed
-as a warmup side effect.
+check as generated mappers. `MappingDefinitionInterface` is a read and registry
+contract, not an executable extension SPI: core dispatch supports only the
+built-in conventional, direct-custom, and provider-custom definition types.
+Use `CustomObjectMapperInterface` with `CustomMappingDefinition` for custom
+execution. `warmup()` deliberately skips custom mappings and returns only the
+generated conventional mapping keys, so a custom mapper is never executed as a
+warmup side effect.
 
 ## Resolve an application-owned custom mapper at runtime
 
@@ -287,8 +291,16 @@ disabled and explicitly warms the registered mappings before traffic reaches
 the release:
 
 ```php
-$mapper->warmup();
+use Sirix\ObjectMapper\Contract\WarmableObjectMapperInterface;
+
+/** @var WarmableObjectMapperInterface $warmableMapper */
+$warmableMapper = $mapper;
+$warmableMapper->warmup();
 ```
+
+`ObjectMapperInterface` is mapping-only so application-owned implementations
+remain compatible. Request `WarmableObjectMapperInterface` only from deployment
+or cache-warmup wiring that requires `warmup()`.
 
 Warmup compiles every conventional pair and its conventional nested
 dependencies in deterministic dependency order, and reports failures together.
@@ -304,7 +316,7 @@ cache; warm again after every such deployment. Constant values participate in
 the same cache identity and are emitted as fixed literals, so re-warm after a
 constant registration changes as well.
 
-## Upgrading to 0.5.0
+## Upgrading to 0.7.0
 
 Create one `MappingRegistry` during application wiring and pass that same
 instance to both `MappingMetadataFactory` and `MapperCache` for structural
@@ -315,16 +327,19 @@ and `MapperCache`, as shown above. `warmup()` skips every custom mapping,
 including provider-backed children: it neither resolves a provider nor creates
 or executes a custom mapper.
 
-`MapRule::constant()` is the only new mapping rule in 0.5.0; no conditional
-operation shipped. The generated-mapper cache format is now `5`, so format-4
-files are not reusable. Deploy the 0.5.0 code and trusted registrations first,
-then clear or rotate the old owner-only cache directory, create the new
-owner-only (`0700`) directory, and warm it as the runtime owner before serving
-traffic.
+Release `0.7.0` retains generated-mapper cache format `6`; no generated-cache
+or cache-identity migration is required. Deploy the updated code and trusted
+registrations, then warm the owner-only (`0700`) cache as the runtime owner
+before serving traffic.
 
 ## Mapping rules and guarantees
 
 - Source and target must be existing concrete classes and each pair is unique.
+  Every built-in definition rejects a `class_alias()` value: registrations must
+  use the exact canonical name returned by `ReflectionClass::getName()`.
+  Conventional `MappingDefinition` pairs must additionally use named concrete
+  classes; direct and provider-backed custom definitions may use anonymous
+  concrete classes.
 - The target needs a public constructor. Values are passed by named argument.
 - A target parameter resolves, in order, from a public non-static property,
   public zero-argument `getX()`, or boolean-only `isX()` method.
@@ -338,7 +353,7 @@ traffic.
   selector needed for diagnosis. They do not include mapped values; do not add
   source objects containing sensitive data to application logs.
 
-## Non-goals in 0.5.0
+## Non-goals
 
 This is not a serializer or a mapper for untrusted HTTP/JSON input. It has no
 automatic casts, implicit nested/collection traversal, reverse mapping,
