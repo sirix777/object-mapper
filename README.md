@@ -94,7 +94,7 @@ only when this opt-in is selected. Mapping does not preload relations or alter
 Cycle lazy loading, so applications remain responsible for query preloading and
 avoiding N+1 queries before mapping.
 
-Generated-mapper cache format `6` includes this choice. Release `0.7.0`
+Generated-mapper cache format `6` includes this choice. Release `0.8.0`
 retains format `6`; generated files remain owner-only (`0600`).
 
 ## Customize a conventional mapping
@@ -318,7 +318,104 @@ cache; warm again after every such deployment. Constant values participate in
 the same cache identity and are emitted as fixed literals, so re-warm after a
 constant registration changes as well.
 
-## Upgrading to 0.7.0
+## Prepared cache for long-running workers
+
+By default, each conventional mapping execution revalidates its metadata and
+generated-cache key. This is the development-safe mode: changes to mapped
+source, target, or transformer PHP files are detected by the normal cache-key
+path in a live process.
+
+For a production worker with a fixed, application-owned mapping registry, opt
+in to reuse the prepared conventional mapping for the lifetime of each exact
+`MappingDefinition` object:
+
+```php
+$cache = new MapperCache(
+    new MappingMetadataFactory($transformers, mappingRegistry: $registry),
+    new PhpMapperGenerator(),
+    __DIR__ . '/var/cache/object-mapper',
+    $transformers,
+    generateOnDemand: false,
+    mappingRegistry: $registry,
+    reusePreparedMappings: true,
+);
+$mapper = new ObjectMapper($registry, $cache);
+
+// Run once while the worker boots, before it accepts requests.
+$mapper->warmup();
+```
+
+This opt-in avoids repeated reflection, source-file hashing, metadata
+normalization, and generated-code rendering for a prepared definition. It is a
+trust boundary: **live PHP code edits and registration changes are not detected
+in an already running worker.** Deploy in this order:
+
+```text
+publish application code and trusted registrations
+  -> start or restart every PHP worker
+  -> construct the mapper with reusePreparedMappings: true
+  -> warmup() successfully
+  -> accept traffic
+```
+
+Restart or reload every worker whenever mapped source, target, transformer, or
+mapping-registration code changes. Prepared entries are local to one worker;
+they are neither shared nor synchronized between workers. Keep
+`generateOnDemand: false` in production and do not defer first-time preparation
+until traffic is being served.
+
+The registry must be fixed application configuration. Do not put
+`MappingDefinition` instances derived from request, tenant, or user input in a
+shared long-running registry, and do not retain request state in definitions,
+transformers, or custom mappers. Distinct dynamic definitions may retain
+generated mappers for a worker lifetime. Custom and provider-custom mappings
+continue to execute through their own runtime dispatch and are not prepared by
+this option.
+
+### Worker operations
+
+- **FrankenPHP worker mode:** construct and warm the mapper during each worker
+  boot, then gracefully restart workers after deployment. Use file watching
+  only for local development, not as production invalidation.
+- **RoadRunner:** warm during worker boot and reload the worker pool after a
+  deployment (for example, `rr reset`).
+- **Swoole/OpenSwoole:** publish the release first, then gracefully reload
+  workers so every replacement worker boots and warms before serving requests.
+  This mode is supported only for **non-yielding** mapping operations. A source
+  getter, transformer, or custom mapper must not yield through coroutine I/O
+  while mapping; the Fiber isolation coverage is for native PHP Fibers, not a
+  Swoole/OpenSwoole coroutine-local context.
+
+Mapping failures retain structured pair/parameter diagnostics. Do not add the
+mapped source object or its values to application logs.
+
+### Benchmarking prepared mappings
+
+Run the included benchmark after dependency installation:
+
+```sh
+php tools/benchmark.php
+```
+
+It emits JSON with the median of five rounds for throughput, wall-clock time,
+current-process user/system CPU time, and PHP-memory deltas. CPU time excludes
+child processes, so do not use the cold-first result as a total deployment CPU
+measurement: it includes generated-file linting in a child PHP process.
+
+On this project's PHP 8.2 CLI environment (OPcache CLI and JIT disabled), an
+illustrative run after warmup produced:
+
+| Scenario | Default | Prepared | CPU time per mapping |
+| --- | ---: | ---: | ---: |
+| Simple DTO | 5,064 ops/s | 612,920 ops/s | 0.1966 ms → 0.00162 ms |
+| Nested DTO | 1,684 ops/s | 213,770 ops/s | 0.5823 ms → 0.00468 ms |
+| Collection of 100 DTOs | 1,534 ops/s | 7,118 ops/s | 0.6509 ms → 0.1404 ms |
+
+The hot-path runs retained no additional PHP allocator memory between rounds.
+Run the benchmark on target hardware and compare ratios rather than treating
+these absolute values as a production capacity guarantee.
+
+## Upgrading to 0.8.0
 
 Create one `MappingRegistry` during application wiring and pass that same
 instance to both `MappingMetadataFactory` and `MapperCache` for structural
@@ -329,7 +426,7 @@ and `MapperCache`, as shown above. `warmup()` skips every custom mapping,
 including provider-backed children: it neither resolves a provider nor creates
 or executes a custom mapper.
 
-Release `0.7.0` retains generated-mapper cache format `6`; no generated-cache
+Release `0.8.0` retains generated-mapper cache format `6`; no generated-cache
 or cache-identity migration is required. Deploy the updated code and trusted
 registrations, then warm the owner-only (`0700`) cache as the runtime owner
 before serving traffic.

@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-31
+
+### Added
+
+- Opt-in `MapperCache` prepared-mapping reuse for conventional mappings. It
+  caches validated metadata, generated-cache identity, and the generated mapper
+  by `MappingDefinition` object identity for the lifetime of a PHP worker.
+
+### Changed
+
+- Production applications may enable `reusePreparedMappings` with
+  `generateOnDemand: false` after worker-boot `warmup()`. This mode is intended
+  for a fixed application-owned registry; workers must be restarted or reloaded
+  after changes to mapped classes, transformers, or mapping registrations.
+- FrankenPHP and RoadRunner workers warm before accepting traffic and reload
+  after deployment. Swoole/OpenSwoole support is limited to non-yielding
+  mapping operations; native PHP Fiber coverage does not establish a
+  coroutine-local Swoole/OpenSwoole context.
+
+### Security
+
+- Prepared entries are process-local and must not be populated from request,
+  tenant, or user-controlled mapping definitions. Mapping diagnostics remain
+  structured and must not be supplemented by logging mapped objects or values.
+
 ## [0.7.0] - 2026-08-30
 
 ### Added

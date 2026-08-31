@@ -69,6 +69,7 @@ use function unlink;
  *
  * @phpstan-type Dependency array{definition: CustomMappingDefinition|MappingDefinition|ProviderCustomMappingDefinition, mapper: GeneratedMapperInterface|null}
  * @phpstan-type CollectionFailureDetails array{source: string, target: string, parameter: string, expected: string}
+ * @phpstan-type PreparedMapping array{metadata: MappingMetadata, cacheKey: string, mapper: GeneratedMapperInterface}
  * @phpstan-type Scope array{definition: MappingDefinition, source: string, target: string, execution: object, dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}
  */
 final class MapperCache implements NestedMappingRuntimeInterface
@@ -88,6 +89,9 @@ final class MapperCache implements NestedMappingRuntimeInterface
     /** @var WeakMap<object, array<string, array{dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}>> */
     private readonly WeakMap $executionMappings;
 
+    /** @var WeakMap<MappingDefinition, PreparedMapping> */
+    private readonly WeakMap $preparedMappings;
+
     private readonly CustomMappingExecutor $customMappingExecutor;
 
     public function __construct(
@@ -99,6 +103,7 @@ final class MapperCache implements NestedMappingRuntimeInterface
         private readonly ?MappingRegistryInterface $mappingRegistry = null,
         ?CustomObjectMapperProviderInterface $customObjectMapperProvider = null,
         ?CustomMappingExecutor $customMappingExecutor = null,
+        private readonly bool $reusePreparedMappings = false,
     ) {
         if ('' === $cacheDirectory) {
             throw new InvalidArgumentException('The mapper cache directory cannot be empty.');
@@ -107,14 +112,13 @@ final class MapperCache implements NestedMappingRuntimeInterface
         $this->weakMap               = new WeakMap();
         $this->fiberScopes           = new WeakMap();
         $this->executionMappings     = new WeakMap();
+        $this->preparedMappings      = new WeakMap();
         $this->customMappingExecutor = $customMappingExecutor ?? new CustomMappingExecutor($customObjectMapperProvider);
     }
 
     public function get(MappingDefinition $mappingDefinition): GeneratedMapperInterface
     {
-        $mappingMetadata = $this->metadata($mappingDefinition);
-
-        return $this->resolve($mappingDefinition, $this->generateOnDemand, $mappingMetadata);
+        return $this->prepare($mappingDefinition, $this->generateOnDemand)['mapper'];
     }
 
     public function map(MappingDefinition $mappingDefinition, object $source): object
@@ -123,13 +127,13 @@ final class MapperCache implements NestedMappingRuntimeInterface
         $this->saveScopes([]);
 
         try {
-            $mappingMetadata = $this->metadata($mappingDefinition);
+            $preparedMapping = $this->prepare($mappingDefinition, $this->generateOnDemand);
 
             return $this->executeConventional(
                 $mappingDefinition,
                 $source,
-                $this->resolve($mappingDefinition, $this->generateOnDemand, $mappingMetadata),
-                $mappingMetadata,
+                $preparedMapping['mapper'],
+                $preparedMapping['metadata'],
             );
         } finally {
             $this->saveScopes($scopes);
@@ -138,7 +142,7 @@ final class MapperCache implements NestedMappingRuntimeInterface
 
     public function warm(MappingDefinition $mappingDefinition, ?MappingMetadata $mappingMetadata = null): GeneratedMapperInterface
     {
-        return $this->resolve($mappingDefinition, true, $mappingMetadata ?? $this->metadata($mappingDefinition));
+        return $this->prepare($mappingDefinition, true, $mappingMetadata)['mapper'];
     }
 
     /** @internal */
@@ -469,8 +473,9 @@ final class MapperCache implements NestedMappingRuntimeInterface
                     throw new MappingCompilationFailed('Nested mapping dependency does not match its compiled definition.');
                 }
 
-                $mapper             = $this->resolve($dependency, $this->generateOnDemand, $dependencyMetadata);
-                $this->scopeMappings($dependency, $execution, $dependencyMetadata);
+                $preparedMapping    = $this->prepare($dependency, $this->generateOnDemand, $dependencyMetadata);
+                $mapper             = $preparedMapping['mapper'];
+                $this->scopeMappings($dependency, $execution, $preparedMapping['metadata']);
             }
 
             $dependencies[$this->dependencyKey($nested->source, $nested->target)] = [
@@ -540,13 +545,38 @@ final class MapperCache implements NestedMappingRuntimeInterface
         return sprintf('string key sha256:%s (length %d)', substr(hash('sha256', $key), 0, 16), strlen($key));
     }
 
-    private function resolve(
+    /**
+     * @return PreparedMapping
+     */
+    private function prepare(
         MappingDefinition $mappingDefinition,
         bool $allowGeneration,
         ?MappingMetadata $mappingMetadata = null,
-    ): GeneratedMapperInterface {
+    ): array {
+        if ($this->reusePreparedMappings && isset($this->preparedMappings[$mappingDefinition])) {
+            return $this->preparedMappings[$mappingDefinition];
+        }
+
         $mappingMetadata ??= $this->mappingMetadataFactory->create($mappingDefinition);
-        $key             = $this->phpMapperGenerator->cacheKey($mappingMetadata);
+        $cacheKey         = $this->phpMapperGenerator->cacheKey($mappingMetadata);
+        $preparedMapping  = [
+            'metadata' => $mappingMetadata,
+            'cacheKey' => $cacheKey,
+            'mapper'   => $this->resolve($mappingDefinition, $allowGeneration, $mappingMetadata, $cacheKey),
+        ];
+        if ($this->reusePreparedMappings) {
+            $this->preparedMappings[$mappingDefinition] = $preparedMapping;
+        }
+
+        return $preparedMapping;
+    }
+
+    private function resolve(
+        MappingDefinition $mappingDefinition,
+        bool $allowGeneration,
+        MappingMetadata $mappingMetadata,
+        string $key,
+    ): GeneratedMapperInterface {
         if (isset($this->mappers[$key])) {
             return $this->mappers[$key];
         }

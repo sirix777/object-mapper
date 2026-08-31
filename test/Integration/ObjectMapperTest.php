@@ -16,6 +16,8 @@ use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
 use Sirix\ObjectMapper\Contract\ObjectMapperInterface;
+use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
+use Sirix\ObjectMapper\Contract\ValueTransformerRegistryInterface;
 use Sirix\ObjectMapper\Contract\WarmableObjectMapperInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
@@ -1946,6 +1948,210 @@ final class ObjectMapperTest extends TestCase
         self::assertStringContainsString('integer key 2', $interleaved->getReturn());
     }
 
+    public function testPreparedCacheMapsWarmedSimpleNestedAndCollectionMappings(): void
+    {
+        $definitions = [
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+                'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+            ]),
+            new MappingDefinition(NestedReleaseCollectionSource::class, NestedReleaseCollectionDto::class, [
+                'collection' => MapRule::from('collection')->nested(ReleaseCollectionDto::class),
+            ]),
+        ];
+        $objectMapper = $this->mapperWithPreparedCache(false, true, ...$definitions);
+
+        self::assertSame([
+            Release::class . '->' . ReleaseDto::class,
+            ReleaseCollectionSource::class . '->' . ReleaseCollectionDto::class,
+            NestedReleaseCollectionSource::class . '->' . NestedReleaseCollectionDto::class,
+        ], $objectMapper->warmup());
+
+        $releaseDto                 = $objectMapper->map(new Release('simple'), ReleaseDto::class);
+        $nestedReleaseCollectionDto = $objectMapper->map(
+            new NestedReleaseCollectionSource(new ReleaseCollectionSource([new Release('nested')])),
+            NestedReleaseCollectionDto::class,
+        );
+
+        self::assertSame('simple', $releaseDto->version);
+        self::assertSame('nested', $nestedReleaseCollectionDto->collection->releases[0]->version);
+    }
+
+    public function testPreparedCacheDoesNotRepeatMetadataPreparationForTheSameDefinition(): void
+    {
+        [$objectMapper, $countingValueTransformerRegistry] = $this->mapperWithCountingTransformer(true);
+
+        $objectMapper->warmup();
+        $objectMapper->map(new ConventionalSource(1, 'first', true), ConventionalTarget::class);
+        $objectMapper->map(new ConventionalSource(2, 'second', false), ConventionalTarget::class);
+
+        // The warmup metadata compilation reads the transformer once; each
+        // generated mapper execution reads it once. A second metadata/cache-key
+        // preparation would make one additional registry read per mapping.
+        self::assertSame(3, $countingValueTransformerRegistry->getCalls);
+    }
+
+    public function testDefaultCacheModeRepeatsMetadataPreparationForTheSameDefinition(): void
+    {
+        [$objectMapper, $countingValueTransformerRegistry] = $this->mapperWithCountingTransformer(false);
+
+        $objectMapper->warmup();
+        $objectMapper->map(new ConventionalSource(1, 'first', true), ConventionalTarget::class);
+        $objectMapper->map(new ConventionalSource(2, 'second', false), ConventionalTarget::class);
+
+        // The warmup metadata compilation and each generated mapper execution
+        // read the transformer once. The default path also recompiles metadata
+        // and the generated-cache key for each map() call.
+        self::assertSame(5, $countingValueTransformerRegistry->getCalls);
+    }
+
+    public function testPreparedCacheDoesNotReuseAnEntryForANewRootDefinitionIdentity(): void
+    {
+        $freshRootDefinitionRegistry = new FreshRootDefinitionRegistry();
+        $valueTransformerRegistry    = new ValueTransformerRegistry();
+        $objectMapper                = new ObjectMapper(
+            $freshRootDefinitionRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $freshRootDefinitionRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                true,
+                $freshRootDefinitionRegistry,
+                reusePreparedMappings: true,
+            ),
+        );
+
+        self::assertSame('first', $objectMapper->map(new FreshRootDefinitionSource('source'), FreshRootDefinitionTarget::class)->value);
+        self::assertSame('second', $objectMapper->map(new FreshRootDefinitionSource('source'), FreshRootDefinitionTarget::class)->value);
+    }
+
+    public function testDefaultCacheModeAlsoResolvesEachFreshRootDefinition(): void
+    {
+        $freshRootDefinitionRegistry = new FreshRootDefinitionRegistry();
+        $valueTransformerRegistry    = new ValueTransformerRegistry();
+        $objectMapper                = new ObjectMapper(
+            $freshRootDefinitionRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $freshRootDefinitionRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                true,
+                $freshRootDefinitionRegistry,
+            ),
+        );
+
+        self::assertSame('first', $objectMapper->map(new FreshRootDefinitionSource('source'), FreshRootDefinitionTarget::class)->value);
+        self::assertSame('second', $objectMapper->map(new FreshRootDefinitionSource('source'), FreshRootDefinitionTarget::class)->value);
+    }
+
+    public function testPreparedCacheRetainsNestedDependencyIdentityValidation(): void
+    {
+        $mappingDefinition          = new MappingDefinition(Release::class, ReleaseDto::class);
+        $statefulDependencyRegistry = new StatefulDependencyRegistry(
+            new MappingRegistry([
+                $mappingDefinition,
+                new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+                    'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+                ]),
+            ]),
+            Release::class,
+            ReleaseDto::class,
+            new MappingDefinition(Release::class, ReleaseDto::class),
+        );
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $objectMapper             = new ObjectMapper(
+            $statefulDependencyRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $statefulDependencyRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                true,
+                $statefulDependencyRegistry,
+                reusePreparedMappings: true,
+            ),
+        );
+
+        $this->expectException(MappingCompilationFailed::class);
+        $this->expectExceptionMessage('Nested mapping dependency does not match its compiled definition.');
+        $objectMapper->map(new ReleaseCollectionSource([new Release('version')]), ReleaseCollectionDto::class);
+    }
+
+    public function testPreparedCacheBypassesCustomAndProviderCustomMappings(): void
+    {
+        $recordingCustomChildMapper    = new RecordingCustomChildMapper();
+        $recordingCustomMapperProvider = new RecordingCustomMapperProvider([
+            'provider' => new RecordingProviderCustomMapper(),
+        ]);
+        $objectMapper = $this->mapperWithPreparedCacheAndProvider(
+            true,
+            $recordingCustomMapperProvider,
+            new CustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, $recordingCustomChildMapper),
+            new ProviderCustomMappingDefinition(Release::class, ReleaseDto::class, 'provider'),
+        );
+
+        $objectMapper->warmup();
+        $objectMapper->map(new CustomChildSource('custom'), CustomChildDto::class);
+        $objectMapper->map(new CustomChildSource('custom'), CustomChildDto::class);
+        $objectMapper->map(new Release('provider'), ReleaseDto::class);
+        $objectMapper->map(new Release('provider'), ReleaseDto::class);
+
+        self::assertSame(2, $recordingCustomChildMapper->invocations);
+        self::assertSame(2, $recordingCustomMapperProvider->lookups);
+    }
+
+    public function testPreparedCacheIsolatesInterleavedFiberScopesAfterWarmup(): void
+    {
+        $definitions = [
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new MappingDefinition(FiberCollectionFailureSource::class, FiberCollectionFailureDto::class, [
+                'releases' => MapRule::fromGetter('getReleases')->collection(Release::class, ReleaseDto::class),
+            ]),
+        ];
+        $mappingRegistry          = new MappingRegistry($definitions);
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mapperCache              = new MapperCache(
+            new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+            new PhpMapperGenerator(),
+            $this->cacheDirectory,
+            $valueTransformerRegistry,
+            true,
+            $mappingRegistry,
+            reusePreparedMappings: true,
+        );
+        $objectMapper = new ObjectMapper($mappingRegistry, $mapperCache);
+        $objectMapper->warmup();
+
+        $first = new Fiber(static function() use ($objectMapper, $mapperCache): string {
+            try {
+                $objectMapper->map(new FiberCollectionFailureSource($mapperCache, true, 1), FiberCollectionFailureDto::class);
+            } catch (MappingExecutionFailed $exception) {
+                return $exception->getMessage();
+            }
+
+            return 'mapping unexpectedly succeeded';
+        });
+        $second = new Fiber(static function() use ($objectMapper, $mapperCache): string {
+            try {
+                $objectMapper->map(new FiberCollectionFailureSource($mapperCache, true, 2), FiberCollectionFailureDto::class);
+            } catch (MappingExecutionFailed $exception) {
+                return $exception->getMessage();
+            }
+
+            return 'mapping unexpectedly succeeded';
+        });
+
+        $first->start();
+        $second->start();
+        $first->resume();
+        $second->resume();
+
+        self::assertStringContainsString('integer key 1', $first->getReturn());
+        self::assertStringContainsString('integer key 2', $second->getReturn());
+    }
+
     public function testItPreparesNestedDependenciesBeforeCollectionIteration(): void
     {
         $definitions = [
@@ -2313,6 +2519,83 @@ final class ObjectMapperTest extends TestCase
         );
     }
 
+    private function mapperWithPreparedCache(
+        bool $generateOnDemand,
+        bool $reusePreparedMappings,
+        MappingDefinitionInterface ...$definitions,
+    ): ObjectMapper {
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mappingRegistry          = new MappingRegistry($definitions);
+
+        return new ObjectMapper(
+            $mappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                $generateOnDemand,
+                $mappingRegistry,
+                reusePreparedMappings: $reusePreparedMappings,
+            ),
+        );
+    }
+
+    /**
+     * @return array{ObjectMapper, CountingValueTransformerRegistry}
+     */
+    private function mapperWithCountingTransformer(bool $reusePreparedMappings): array
+    {
+        $mappingDefinition = new MappingDefinition(ConventionalSource::class, ConventionalTarget::class, [
+            'name' => MapRule::from('name')->through(PreparedCacheCountingTransformer::class),
+        ]);
+        $mappingRegistry                  = new MappingRegistry([$mappingDefinition]);
+        $countingValueTransformerRegistry = new CountingValueTransformerRegistry(new PreparedCacheCountingTransformer());
+
+        return [
+            new ObjectMapper(
+                $mappingRegistry,
+                new MapperCache(
+                    new MappingMetadataFactory($countingValueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                    new PhpMapperGenerator(),
+                    $this->cacheDirectory,
+                    $countingValueTransformerRegistry,
+                    false,
+                    $mappingRegistry,
+                    reusePreparedMappings: $reusePreparedMappings,
+                ),
+            ),
+            $countingValueTransformerRegistry,
+        ];
+    }
+
+    private function mapperWithPreparedCacheAndProvider(
+        bool $generateOnDemand,
+        CustomObjectMapperProviderInterface $customObjectMapperProvider,
+        MappingDefinitionInterface ...$definitions,
+    ): ObjectMapper {
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mappingRegistry          = new MappingRegistry($definitions);
+        $customMappingExecutor    = new CustomMappingExecutor($customObjectMapperProvider);
+
+        return new ObjectMapper(
+            $mappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                $generateOnDemand,
+                $mappingRegistry,
+                $customObjectMapperProvider,
+                $customMappingExecutor,
+                true,
+            ),
+            $customObjectMapperProvider,
+            $customMappingExecutor,
+        );
+    }
+
     private function mapperWithProvider(
         bool $generateOnDemand,
         ?CustomObjectMapperProviderInterface $customObjectMapperProvider,
@@ -2616,6 +2899,57 @@ final class CountingMappingRegistry implements MappingRegistryInterface
     {
         return $this->mappingRegistry->all();
     }
+}
+
+final class FreshRootDefinitionRegistry implements MappingRegistryInterface
+{
+    private int $reads = 0;
+
+    public function get(string $source, string $target): MappingDefinitionInterface
+    {
+        ++$this->reads;
+
+        return new MappingDefinition(FreshRootDefinitionSource::class, FreshRootDefinitionTarget::class, [
+            'value' => MapRule::constant(1 === $this->reads ? 'first' : 'second'),
+        ], ['value']);
+    }
+
+    public function all(): iterable
+    {
+        return [];
+    }
+}
+
+final class CountingValueTransformerRegistry implements ValueTransformerRegistryInterface
+{
+    public int $getCalls = 0;
+
+    public function __construct(private readonly ValueTransformerInterface $valueTransformer) {}
+
+    public function get(string $transformer): ValueTransformerInterface
+    {
+        ++$this->getCalls;
+
+        return $this->valueTransformer;
+    }
+}
+
+final class PreparedCacheCountingTransformer implements ValueTransformerInterface
+{
+    public function transform(string $value): string
+    {
+        return $value;
+    }
+}
+
+final readonly class FreshRootDefinitionSource
+{
+    public function __construct(public string $value) {}
+}
+
+final readonly class FreshRootDefinitionTarget
+{
+    public function __construct(public string $value) {}
 }
 
 final class StatefulDependencyRegistry implements MappingRegistryInterface
