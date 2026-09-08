@@ -68,9 +68,9 @@ use function unlink;
 /**
  * @internal
  *
- * @phpstan-type Dependency array{definition: CustomMappingDefinition|MappingDefinition|ProviderCustomMappingDefinition, mapper: GeneratedMapperInterface|null}
+ * @phpstan-type Dependency array{definition: CustomMappingDefinition|MappingDefinition|ProviderCustomMappingDefinition, mapper: GeneratedMapperInterface|null, hasStructuralMappings: bool}
  * @phpstan-type CollectionFailureDetails array{source: string, target: string, parameter: string, expected: string, elementTarget: class-string, sourceMatch: SourceMatchMode}
- * @phpstan-type PreparedMapping array{metadata: MappingMetadata, cacheKey: string, mapper: GeneratedMapperInterface}
+ * @phpstan-type PreparedMapping array{metadata: MappingMetadata, cacheKey: string, mapper: GeneratedMapperInterface, hasStructuralMappings: bool}
  * @phpstan-type Scope array{definition: MappingDefinition, source: string, target: string, execution: object, dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}
  */
 final class MapperCache implements NestedMappingRuntimeInterface, CollectionMappingRuntimeInterface
@@ -130,10 +130,15 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         try {
             $preparedMapping = $this->prepare($mappingDefinition, $this->generateOnDemand);
 
+            if (! $preparedMapping['hasStructuralMappings']) {
+                return $this->executeLeaf($mappingDefinition, $source, $preparedMapping['mapper']);
+            }
+
             return $this->executeConventional(
                 $mappingDefinition,
                 $source,
                 $preparedMapping['mapper'],
+                $preparedMapping['hasStructuralMappings'],
                 $preparedMapping['metadata'],
             );
         } finally {
@@ -228,7 +233,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
                 ));
             }
 
-            $mapped = $this->executeConventional($mappingDefinition, $value, $generatedMapper);
+            $mapped = $this->executeConventional($mappingDefinition, $value, $generatedMapper, $dependency['hasStructuralMappings']);
         } elseif ($mappingDefinition instanceof CustomMappingDefinition) {
             $mapped = $this->mapCustom($mappingDefinition, $value, $this->customMappingExecutor);
         } elseif ($mappingDefinition instanceof ProviderCustomMappingDefinition) {
@@ -289,8 +294,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             return null;
         }
 
-        $childMappings = $this->executionMappings[$scope['execution']][$definition->key()] ?? null;
-        if (null === $childMappings || [] !== $childMappings['dependencies'] || [] !== $childMappings['collections']) {
+        if ($dependency['hasStructuralMappings']) {
             return null;
         }
 
@@ -299,28 +303,17 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             throw new MappingCompilationFailed('Collection mapping dependency has no generated mapper.');
         }
 
-        // This immutable child frame is local to this invocation. Each item enters
-        // it only after its parent collection boundary has validated the element.
-        $childScopes   = $parentScopes;
-        $childScopes[] = [
-            'definition' => $definition,
-            'source'     => $definition->source,
-            'target'     => $definition->target,
-            'execution'  => $scope['execution'],
-            ...$childMappings,
-        ];
         $mapped = [];
         foreach ($values as $key => $element) {
             if (! is_object($element) || ! SourceMatcher::matches($element, $elementSource, $sourceMatchMode)) {
                 $this->collectionElementTypeFailure($source, $target, $parameter, $key, $elementSource, $element);
             }
 
-            $this->saveScopes($childScopes);
+            // Leaf callbacks must not inherit the parent collection's authority.
+            $this->saveScopes([]);
 
             try {
                 $result = $mapper->map($element);
-            } catch (GeneratedMappingExecutionFailed $exception) {
-                throw $exception;
             } catch (Throwable) {
                 throw $this->executionFailure($definition);
             } finally {
@@ -421,12 +414,38 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             && $scope['execution'] === $details['execution'];
     }
 
+    /** Runs a leaf after its caller has isolated the active scopes. */
+    private function executeLeaf(
+        MappingDefinition $mappingDefinition,
+        object $source,
+        GeneratedMapperInterface $generatedMapper,
+    ): object {
+        try {
+            return $generatedMapper->map($source);
+        } catch (Throwable) {
+            // A leaf cannot issue a structural diagnostic, including a replay.
+            throw $this->executionFailure($mappingDefinition);
+        }
+    }
+
     private function executeConventional(
         MappingDefinition $mappingDefinition,
         object $source,
         GeneratedMapperInterface $generatedMapper,
+        bool $hasStructuralMappings,
         ?MappingMetadata $mappingMetadata = null,
     ): object {
+        if (! $hasStructuralMappings) {
+            $scopes = $this->scopes();
+            $this->saveScopes([]);
+
+            try {
+                return $this->executeLeaf($mappingDefinition, $source, $generatedMapper);
+            } finally {
+                $this->saveScopes($scopes);
+            }
+        }
+
         $isRoot = null === $this->activeScope();
         $this->pushMapping($mappingDefinition, $mappingMetadata);
 
@@ -566,21 +585,26 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
                 throw new MappingCompilationFailed('Nested mapping dependency does not match its compiled definition.');
             }
 
-            $mapper = null;
+            $mapper                = null;
+            $hasStructuralMappings = false;
             if ($dependency instanceof MappingDefinition) {
                 $dependencyMetadata = $this->mappingMetadataFactory->compiledDependencyMetadata($mappingMetadata, $nested);
                 if (! $dependencyMetadata instanceof MappingMetadata) {
                     throw new MappingCompilationFailed('Nested mapping dependency does not match its compiled definition.');
                 }
 
-                $preparedMapping    = $this->prepare($dependency, $this->generateOnDemand, $dependencyMetadata);
-                $mapper             = $preparedMapping['mapper'];
-                $this->scopeMappings($dependency, $execution, $preparedMapping['metadata']);
+                $preparedMapping       = $this->prepare($dependency, $this->generateOnDemand, $dependencyMetadata);
+                $mapper                = $preparedMapping['mapper'];
+                $hasStructuralMappings = $preparedMapping['hasStructuralMappings'];
+                if ($hasStructuralMappings) {
+                    $this->scopeMappings($dependency, $execution, $preparedMapping['metadata']);
+                }
             }
 
             $dependencies[$this->dependencyKey($nested->source, $nested->target)] = [
-                'definition' => $dependency,
-                'mapper'     => $mapper,
+                'definition'            => $dependency,
+                'mapper'                => $mapper,
+                'hasStructuralMappings' => $hasStructuralMappings,
             ];
 
             if ('collection' === $nested->operation && null !== $nested->elementSource) {
@@ -662,15 +686,27 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         $mappingMetadata ??= $this->mappingMetadataFactory->create($mappingDefinition);
         $cacheKey         = $this->phpMapperGenerator->cacheKey($mappingMetadata);
         $preparedMapping  = [
-            'metadata' => $mappingMetadata,
-            'cacheKey' => $cacheKey,
-            'mapper'   => $this->resolve($mappingDefinition, $allowGeneration, $mappingMetadata, $cacheKey),
+            'metadata'              => $mappingMetadata,
+            'cacheKey'              => $cacheKey,
+            'mapper'                => $this->resolve($mappingDefinition, $allowGeneration, $mappingMetadata, $cacheKey),
+            'hasStructuralMappings' => $this->hasStructuralMappings($mappingMetadata),
         ];
         if ($this->reusePreparedMappings) {
             $this->preparedMappings[$mappingDefinition] = $preparedMapping;
         }
 
         return $preparedMapping;
+    }
+
+    private function hasStructuralMappings(MappingMetadata $mappingMetadata): bool
+    {
+        foreach ($mappingMetadata->parameters as $targetParameter) {
+            if (null !== $targetParameter->nestedMapping) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function resolve(

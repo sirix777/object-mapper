@@ -19,14 +19,17 @@ use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 
 require \dirname(__DIR__) . '/vendor/autoload.php';
 
-$options = \getopt('', ['workload:', 'iterations:', 'rounds:']);
+$options = \getopt('', ['workload:', 'iterations:', 'simple-iterations:', 'getter-iterations:', 'nested-iterations:', 'collection-iterations:', 'rounds:']);
 $workload = $options['workload'] ?? 'all';
-if (! \in_array($workload, ['all', 'collections', 'legacy'], true)) {
-    throw new InvalidArgumentException('Workload must be all, collections, or legacy.');
+if (! \in_array($workload, ['all', 'collections', 'legacy', 'leaves', 'flat', 'getter-transformer', 'nested'], true)) {
+    throw new InvalidArgumentException('Workload must be all, collections, legacy, leaves, flat, getter-transformer, or nested.');
 }
-\define('SIMPLE_ITERATIONS', \benchmarkOption($options, 'iterations', 20_000, 1_000_000));
-\define('NESTED_ITERATIONS', \benchmarkOption($options, 'iterations', 10_000, 1_000_000));
-\define('COLLECTION_ITERATIONS', \benchmarkOption($options, 'iterations', 100, 1_000_000));
+$runLegacy = \in_array($workload, ['all', 'legacy'], true);
+// Per-scenario options override the shared bound without inflating collection runs.
+\define('SIMPLE_ITERATIONS', \benchmarkOption($options, 'simple-iterations', \benchmarkOption($options, 'iterations', 20_000, 1_000_000), 1_000_000));
+\define('GETTER_ITERATIONS', \benchmarkOption($options, 'getter-iterations', SIMPLE_ITERATIONS, 1_000_000));
+\define('NESTED_ITERATIONS', \benchmarkOption($options, 'nested-iterations', \benchmarkOption($options, 'iterations', 10_000, 1_000_000), 1_000_000));
+\define('COLLECTION_ITERATIONS', \benchmarkOption($options, 'collection-iterations', \benchmarkOption($options, 'iterations', 100, 1_000_000), 1_000_000));
 const COLLECTION_SIZE       = 100;
 \define('ROUNDS', \benchmarkOption($options, 'rounds', 5, 100));
 
@@ -38,6 +41,16 @@ final readonly class BenchmarkSimpleSource
 final readonly class BenchmarkSimpleTarget
 {
     public function __construct(public int $id, public string $name, public bool $active) {}
+}
+
+final readonly class BenchmarkGetterSource
+{
+    public function __construct(private string $value) {}
+
+    public function getValue(): string
+    {
+        return $this->value;
+    }
 }
 
 final readonly class BenchmarkChildSource
@@ -145,7 +158,7 @@ try {
     }
 
     $collectionSource = new BenchmarkCollectionSource($children);
-    $metrics          = 'collections' === $workload ? [] : [
+    $metrics          = ! $runLegacy ? [] : [
         'direct_constructor'       => \benchmark(
             static fn (): BenchmarkSimpleTarget => new BenchmarkSimpleTarget($simpleSource->id, $simpleSource->name, $simpleSource->active),
             SIMPLE_ITERATIONS,
@@ -186,15 +199,19 @@ try {
         'warmup_memory'            => $warmupMemory,
     ];
 
-    foreach ('collections' === $workload ? [] : ['default_mapping', 'prepared_mapping'] as $mode) {
+    foreach ($runLegacy ? ['default_mapping', 'prepared_mapping'] : [] as $mode) {
         $metrics[$mode]['collection']['items_per_second'] = \round(
             $metrics[$mode]['collection']['operations_per_second'] * COLLECTION_SIZE,
             1,
         );
     }
 
-    if ('legacy' !== $workload) {
+    if (\in_array($workload, ['all', 'collections'], true)) {
         $metrics['collection_matrix'] = \benchmarkCollections($cacheDirectory);
+    }
+
+    if (! \in_array($workload, ['collections', 'legacy'], true)) {
+        $metrics['leaf_workloads'] = \benchmarkLeaves($cacheDirectory, $workload);
     }
 
     echo \json_encode([
@@ -219,6 +236,7 @@ try {
         'workload'    => [
             'selection'             => $workload,
             'simple_iterations'     => SIMPLE_ITERATIONS,
+            'getter_iterations'     => GETTER_ITERATIONS,
             'nested_iterations'     => NESTED_ITERATIONS,
             'collection_iterations' => COLLECTION_ITERATIONS,
             'collection_size'       => COLLECTION_SIZE,
@@ -280,6 +298,120 @@ function benchmarkOption(array $options, string $name, int $default, int $maximu
 }
 
 /** @return array<string, mixed> */
+function benchmarkLeaves(string $cacheDirectory, string $selection): array
+{
+    $results = [];
+    $shapes = \in_array($selection, ['all', 'leaves'], true) ? ['flat', 'getter-transformer', 'nested'] : [$selection];
+    foreach ($shapes as $shape) {
+        $source = match ($shape) {
+            'flat' => new BenchmarkSimpleSource(42, 'Ada Lovelace', true),
+            'getter-transformer' => new BenchmarkGetterSource('leaf'),
+            'nested' => new BenchmarkNestedSource(new BenchmarkChildSource('leaf')),
+        };
+        $expected = match ($shape) {
+            'flat' => new BenchmarkSimpleTarget(42, 'Ada Lovelace', true),
+            'getter-transformer' => new BenchmarkChildTarget('LEAF'),
+            'nested' => new BenchmarkNestedTarget(new BenchmarkChildTarget('leaf')),
+        };
+        $definition = new MappingDefinition($source::class, $expected::class, match ($shape) {
+            'flat' => [],
+            'getter-transformer' => ['value' => MapRule::fromGetter('getValue')->through(BenchmarkTransformer::class)],
+            'nested' => ['child' => MapRule::from('child')->nested(BenchmarkChildTarget::class)],
+        });
+        $definitions = [$definition];
+        if ('nested' === $shape) {
+            $definitions[] = new MappingDefinition(BenchmarkChildSource::class, BenchmarkChildTarget::class);
+        }
+        $iterations = match ($shape) {
+            'flat' => SIMPLE_ITERATIONS,
+            'getter-transformer' => GETTER_ITERATIONS,
+            'nested' => NESTED_ITERATIONS,
+        };
+        $results[$shape]['iterations'] = $iterations;
+        foreach ([false, true] as $prepared) {
+            $mode = $prepared ? 'prepared' : 'default';
+            \gc_collect_cycles();
+            $memoryBefore = \memory_get_usage();
+            $allocatorBefore = \memory_get_usage(true);
+            $mapperAndCache = \createMapperAndCache(
+                $cacheDirectory,
+                $definitions,
+                $prepared,
+                transformers: new ValueTransformerRegistry([new BenchmarkTransformer()]),
+            );
+            $mapper = $mapperAndCache['mapper'];
+            $mapper->warmup();
+            $retained = \memory_get_usage() - $memoryBefore;
+            $allocatorRetained = \memory_get_usage(true) - $allocatorBefore;
+            $operation = static fn (): object => $mapper->map($source, $expected::class);
+            $results[$shape][$mode] = [
+                'warmup_retained_memory_delta_bytes' => $retained,
+                'warmup_allocator_retained_memory_delta_bytes' => $allocatorRetained,
+                'steady_state' => \benchmarkVerified($operation, $expected, $iterations),
+            ];
+            if ('flat' === $shape && ! $prepared) {
+                $generatedMapper = $mapperAndCache['cache']->get($definition);
+                $results[$shape]['generated_simple_mapping'] = \benchmarkVerified(
+                    static fn (): object => $generatedMapper->map($source),
+                    $expected,
+                    $iterations,
+                );
+                $results[$shape]['direct_constructor'] = \benchmarkVerified(
+                    static fn (): BenchmarkSimpleTarget => new BenchmarkSimpleTarget($source->id, $source->name, $source->active),
+                    $expected,
+                    $iterations,
+                );
+                unset($generatedMapper);
+            }
+            unset($operation, $mapper, $mapperAndCache);
+        }
+    }
+
+    return $results;
+}
+
+/**
+ * @param Closure(): object $operation
+ *
+ * @return array<string, mixed>
+ */
+function benchmarkVerified(Closure $operation, object $expected, int $iterations): array
+{
+    if ($operation() != $expected) {
+        throw new RuntimeException('Leaf benchmark correctness check failed for ' . $expected::class . '.');
+    }
+    $measurement = \benchmark($operation, $iterations);
+    $measurement['repeated_call_retained_memory_deltas_bytes'] = \benchmarkRetention($operation, $iterations);
+    if ($operation() != $expected) {
+        throw new RuntimeException('Leaf benchmark correctness check failed after repeated calls for ' . $expected::class . '.');
+    }
+
+    return $measurement;
+}
+
+/**
+ * @param Closure(): object $operation
+ *
+ * @return list<int>
+ */
+function benchmarkRetention(Closure $operation, int $iterations): array
+{
+    $retention = [];
+    // Two successive blocks expose retention across repeated calls, outside timed rounds.
+    for ($block = 0; $block < 2; ++$block) {
+        \gc_collect_cycles();
+        $before = \memory_get_usage();
+        for ($index = 0; $index < $iterations; ++$index) {
+            $operation();
+        }
+        \gc_collect_cycles();
+        $retention[] = \memory_get_usage() - $before;
+    }
+
+    return $retention;
+}
+
+/** @return array<string, mixed> */
 function benchmarkCollections(string $cacheDirectory): array
 {
     $results = [];
@@ -334,18 +466,7 @@ function benchmarkCollections(string $cacheDirectory): array
                 $measurement = \benchmark($operation, COLLECTION_ITERATIONS);
                 $measurement['collections_per_second'] = $measurement['operations_per_second'];
                 $measurement['items_per_second'] = \round($measurement['operations_per_second'] * $size, 1);
-                // Two successive blocks expose retention across repeated calls, outside timed rounds.
-                $retention = [];
-                for ($block = 0; $block < 2; ++$block) {
-                    \gc_collect_cycles();
-                    $before = \memory_get_usage();
-                    for ($index = 0; $index < COLLECTION_ITERATIONS; ++$index) {
-                        $operation();
-                    }
-                    \gc_collect_cycles();
-                    $retention[] = \memory_get_usage() - $before;
-                }
-                $measurement['repeated_call_retained_memory_deltas_bytes'] = $retention;
+                $measurement['repeated_call_retained_memory_deltas_bytes'] = \benchmarkRetention($operation, COLLECTION_ITERATIONS);
                 $results[$shape][$mode]['sizes'][$size] = $measurement;
                 unset($operation);
             }
@@ -390,23 +511,29 @@ function benchmark(Closure $operation, int $iterations): array
     $operation();
 
     for ($round = 0; $round < ROUNDS; ++$round) {
-        \memory_reset_peak_usage();
+        $usageBefore      = \resourceUsage();
         $memoryBefore     = \memory_get_usage(true);
         $memoryUsedBefore = \memory_get_usage();
-        $usageBefore      = \resourceUsage();
+        \memory_reset_peak_usage();
         $startedAt        = \hrtime(true);
         for ($index = 0; $index < $iterations; ++$index) {
             $operation();
         }
 
+        $elapsed = (\hrtime(true) - $startedAt) / 1_000_000;
+        // Snapshot before allocating CPU samples or growing the measurement arrays.
+        $memoryAfter = \memory_get_usage(true);
+        $memoryUsedAfter = \memory_get_usage();
+        $roundPeakMemory = \memory_get_peak_usage(true);
+        $roundPeakMemoryUsed = \memory_get_peak_usage();
         $usageAfter              = \resourceUsage();
-        $durations[]             = (\hrtime(true) - $startedAt) / 1_000_000;
-        $peakMemory                  = \max($peakMemory, \memory_get_peak_usage(true));
-        $peakMemoryUsed              = \max($peakMemoryUsed, \memory_get_peak_usage());
-        $peakMemoryDeltas[]          = \memory_get_peak_usage(true) - $memoryBefore;
-        $retainedMemoryDeltas[]      = \memory_get_usage(true) - $memoryBefore;
-        $peakMemoryUsedDeltas[]      = \memory_get_peak_usage() - $memoryUsedBefore;
-        $retainedMemoryUsedDeltas[]  = \memory_get_usage() - $memoryUsedBefore;
+        $durations[]             = $elapsed;
+        $peakMemory                  = \max($peakMemory, $roundPeakMemory);
+        $peakMemoryUsed              = \max($peakMemoryUsed, $roundPeakMemoryUsed);
+        $peakMemoryDeltas[]          = $roundPeakMemory - $memoryBefore;
+        $retainedMemoryDeltas[]      = $memoryAfter - $memoryBefore;
+        $peakMemoryUsedDeltas[]      = $roundPeakMemoryUsed - $memoryUsedBefore;
+        $retainedMemoryUsedDeltas[]  = $memoryUsedAfter - $memoryUsedBefore;
         $userCpuDuration          = \resourceUsageDuration($usageBefore, $usageAfter, 'user_ms');
         $systemCpuDuration        = \resourceUsageDuration($usageBefore, $usageAfter, 'system_ms');
         if (null !== $userCpuDuration && null !== $systemCpuDuration) {

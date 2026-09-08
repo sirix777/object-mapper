@@ -40,6 +40,11 @@ use Sirix\ObjectMapper\Runtime\ObjectMapper;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use Sirix\ObjectMapperTest\Support\AccessToken;
 use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
+use Sirix\ObjectMapperTest\Support\CallbackLeafDto;
+use Sirix\ObjectMapperTest\Support\CallbackLeafHolderDto;
+use Sirix\ObjectMapperTest\Support\CallbackLeafHolderSource;
+use Sirix\ObjectMapperTest\Support\CallbackLeafSource;
+use Sirix\ObjectMapperTest\Support\CallbackLeafTransformer;
 use Sirix\ObjectMapperTest\Support\CallbackRelease;
 use Sirix\ObjectMapperTest\Support\CallbackReleaseMapper;
 use Sirix\ObjectMapperTest\Support\CallbackReleaseProvider;
@@ -135,6 +140,7 @@ use function class_alias;
 use function class_exists;
 use function count;
 use function file_get_contents;
+use function file_put_contents;
 use function fileperms;
 use function function_exists;
 use function glob;
@@ -1676,13 +1682,80 @@ final class ObjectMapperTest extends TestCase
         }
     }
 
-    /** @return array<string, array{bool}> */
-    public static function collectionCacheModes(): array
+    #[DataProvider('leafReentryModes')]
+    public function testLeafReentryRestoresIsolatedScopesAcrossFibers(bool $prepared, string $callbackKind, bool $nested): void
     {
-        return [
-            'default'  => [false],
-            'prepared' => [true],
-        ];
+        [$mapper, $cache, $target]                    = $this->leafCallbackRuntime($prepared, $callbackKind);
+        $collectionExecutionTrace                     = new CollectionExecutionTrace();
+        $callbackLeafSource                           = new CallbackLeafSource(static function() use ($mapper, $cache, $collectionExecutionTrace): string {
+            $collectionExecutionTrace->events[] = 'callback';
+            self::assertLeafCannotBorrowParentContext($cache);
+            if (Fiber::getCurrent() instanceof Fiber) {
+                Fiber::suspend('leaf');
+            }
+
+            try {
+                $mapper->map(new FiberCollectionFailureSource($cache, false, 17), FiberCollectionFailureDto::class);
+                self::fail('Expected the independent collection root to fail.');
+            } catch (MappingExecutionFailed $exception) {
+                self::assertStringContainsString(FiberCollectionFailureSource::class . '->' . FiberCollectionFailureDto::class, $exception->getMessage());
+                self::assertStringContainsString('integer key 17', $exception->getMessage());
+                self::assertStringNotContainsString('fiber-secret', $exception->getMessage());
+                self::assertNull($exception->getPrevious());
+            }
+            self::assertLeafCannotBorrowParentContext($cache);
+            self::assertEquals(new ReleaseDto('inner'), $mapper->map(new Release('inner'), ReleaseDto::class));
+
+            return 'leaf';
+        });
+        $callbackLeafHolderSource = $this->leafCallbackParent($mapper, $callbackLeafSource, $target, $nested);
+        $mapper->warmup();
+        self::assertSame([], $collectionExecutionTrace->events);
+        $fiber = new Fiber(static fn (): CallbackLeafHolderDto => $mapper->map($callbackLeafHolderSource, CallbackLeafHolderDto::class));
+        self::assertSame('leaf', $fiber->start());
+        self::assertLeafCannotBorrowParentContext($cache);
+        self::assertEquals(new ReleaseDto('main'), $cache->map(new MappingDefinition(Release::class, ReleaseDto::class), new Release('main')));
+        $fiber->resume();
+        self::assertTrue($fiber->isTerminated());
+        self::assertEquals([new ReleaseDto('sibling')], $fiber->getReturn()->releases);
+        if ($nested) {
+            self::assertInstanceOf($target, $fiber->getReturn()->leaf);
+            self::assertSame('leaf', $fiber->getReturn()->leaf->version);
+        }
+        self::assertLeafCannotBorrowParentContext($cache);
+        self::assertEquals([new ReleaseDto('sibling')], $mapper->map($callbackLeafHolderSource, CallbackLeafHolderDto::class)->releases);
+        self::assertSame(['callback', 'callback'], $collectionExecutionTrace->events);
+    }
+
+    #[DataProvider('leafReentryModes')]
+    public function testLeafFailureCannotAcquireParentDiagnosticsAndCleansUp(bool $prepared, string $callbackKind, bool $nested): void
+    {
+        [$mapper, $cache, $target]                    = $this->leafCallbackRuntime($prepared, $callbackKind);
+        $collectionExecutionTrace                     = new CollectionExecutionTrace();
+        $callbackLeafSource                           = new CallbackLeafSource(static function() use ($cache, $collectionExecutionTrace): string {
+            $collectionExecutionTrace->events[] = 'callback';
+            self::assertLeafCannotBorrowParentContext($cache);
+            if (1 === count($collectionExecutionTrace->events)) {
+                $cache->collectionElementTypeFailure(CallbackLeafHolderSource::class, CallbackLeafHolderDto::class, 'releases', 'sensitive-parent-key', Release::class, null);
+            }
+
+            return 'leaf';
+        });
+        $callbackLeafHolderSource = $this->leafCallbackParent($mapper, $callbackLeafSource, $target, $nested);
+        $mapper->warmup();
+
+        try {
+            $mapper->map($callbackLeafHolderSource, CallbackLeafHolderDto::class);
+            self::fail('Expected the leaf callback to fail.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame('Could not execute mapping ' . CallbackLeafHolderSource::class . '->' . CallbackLeafHolderDto::class . '.', $exception->getMessage());
+            self::assertNull($exception->getPrevious());
+        }
+        self::assertSame(['callback'], $collectionExecutionTrace->events);
+        self::assertLeafCannotBorrowParentContext($cache);
+        self::assertEquals([new ReleaseDto('sibling')], $mapper->map($callbackLeafHolderSource, CallbackLeafHolderDto::class)->releases);
+        self::assertSame(['callback', 'callback'], $collectionExecutionTrace->events);
+        self::assertLeafCannotBorrowParentContext($cache);
     }
 
     public function testWarmupHandlesMultiLevelAndCustomChildrenWithoutExecutingCustomCode(): void
@@ -2388,6 +2461,104 @@ final class ObjectMapperTest extends TestCase
         self::assertSame('nested', $nestedReleaseCollectionDto->collection->releases[0]->version);
     }
 
+    #[DataProvider('collectionCacheModes')]
+    public function testLeafSourceValidationRunsOnEveryRootAndNestedInvocation(bool $reusePreparedMappings): void
+    {
+        foreach ([SourceMatchMode::Exact, SourceMatchMode::CycleProxy] as $mode) {
+            RecordingCycleProxyTransformer::$invocations = 0;
+            $child                                       = new MappingDefinition(CycleProxyEntity::class, CycleProxyEntityDto::class, [
+                'id' => MapRule::from('id')->through(RecordingCycleProxyTransformer::class),
+            ], sourceMatch: $mode);
+            $registry = new MappingRegistry([
+                $child,
+                new MappingDefinition(CycleProxyHolder::class, CycleProxyHolderDto::class, [
+                    'child' => MapRule::from('child')->nested(CycleProxyEntityDto::class),
+                ]),
+            ]);
+            $transformers = new ValueTransformerRegistry([new RecordingCycleProxyTransformer()]);
+            $cache        = new MapperCache(
+                new MappingMetadataFactory($transformers, mappingRegistry: $registry),
+                new PhpMapperGenerator(), $this->cacheDirectory, $transformers,
+                generateOnDemand: true, mappingRegistry: $registry, reusePreparedMappings: $reusePreparedMappings,
+            );
+            $mapper = new ObjectMapper($registry, $cache);
+            $mapper->warmup();
+            self::assertSame(0, RecordingCycleProxyTransformer::$invocations);
+            $expectedInvocations = 0;
+
+            foreach ([false, true] as $nested) {
+                $map = static fn (CycleProxyEntity $cycleProxyEntity): object => $nested
+                    ? $mapper->map(new CycleProxyHolder($cycleProxyEntity), CycleProxyHolderDto::class)->child
+                    : $cache->map($child, $cycleProxyEntity);
+                self::assertEquals(new CycleProxyEntityDto(1), $map(new CycleProxyEntity(1)));
+                ++$expectedInvocations;
+                $rejected = [new NormalCycleEntitySubclass(2), new IndirectCycleProxy(3)];
+                if (SourceMatchMode::Exact === $mode) {
+                    $rejected[] = new DirectCycleProxy(4);
+                } else {
+                    self::assertEquals(new CycleProxyEntityDto(4), $map(new DirectCycleProxy(4)));
+                    ++$expectedInvocations;
+                }
+
+                foreach ($rejected as $source) {
+                    try {
+                        $map($source);
+                        self::fail('Expected the warmed leaf to reject ' . $source::class);
+                    } catch (MappingExecutionFailed $exception) {
+                        self::assertNull($exception->getPrevious());
+                    }
+                    self::assertSame($expectedInvocations, RecordingCycleProxyTransformer::$invocations);
+                }
+                self::assertEquals(new CycleProxyEntityDto(5), $map(new CycleProxyEntity(5)));
+                self::assertSame(++$expectedInvocations, RecordingCycleProxyTransformer::$invocations);
+            }
+        }
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testLeafCacheDoesNotRetainReleasedDefinitions(bool $reusePreparedMappings): void
+    {
+        $mapperCache = new MapperCache(
+            new MappingMetadataFactory(), new PhpMapperGenerator(), $this->cacheDirectory,
+            new ValueTransformerRegistry(), generateOnDemand: true, reusePreparedMappings: $reusePreparedMappings,
+        );
+        foreach (['first', 'second'] as $version) {
+            $mappingDefinition = new MappingDefinition(Release::class, ReleaseDto::class, [
+                'version' => MapRule::constant($version),
+            ], ['version']);
+            $reference = WeakReference::create($mappingDefinition);
+            self::assertEquals(new ReleaseDto($version), $mapperCache->map($mappingDefinition, new Release('source')));
+            unset($mappingDefinition);
+            self::assertNull($reference->get());
+        }
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testLeafSourceFileChangesInvalidateOnlyDefaultCacheEntries(bool $reusePreparedMappings): void
+    {
+        self::assertTrue(mkdir($this->cacheDirectory, 0o700, true));
+        $class = 'LiveLeafSource' . bin2hex(random_bytes(8));
+        $path  = $this->cacheDirectory . '/source.php';
+        $code  = '<?php final class ' . $class . ' { public string $version = "live"; } return new ' . $class . '();';
+        self::assertSame(strlen($code), file_put_contents($path, $code));
+        $source = require $path;
+        self::assertIsObject($source);
+        $definition = new MappingDefinition($source::class, ReleaseDto::class);
+        $mapper     = $this->mapperWithPreparedCache(true, $reusePreparedMappings, $definition);
+        self::assertEquals(new ReleaseDto('live'), $mapper->map($source, ReleaseDto::class));
+        self::assertCount(1, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
+
+        // Change the reflected file's content without redefining a loaded PHP class.
+        $code .= ' // revised source fingerprint';
+        self::assertSame(strlen($code), file_put_contents($path, $code));
+        self::assertEquals(new ReleaseDto('live'), $mapper->map($source, ReleaseDto::class));
+        self::assertCount($reusePreparedMappings ? 1 : 2, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
+
+        $replacement = $this->mapperWithPreparedCache(true, $reusePreparedMappings, $definition);
+        self::assertEquals(new ReleaseDto('live'), $replacement->map($source, ReleaseDto::class));
+        self::assertCount(2, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
+    }
+
     public function testPreparedCacheDoesNotRepeatMetadataPreparationForTheSameDefinition(): void
     {
         [$objectMapper, $countingValueTransformerRegistry] = $this->mapperWithCountingTransformer(true);
@@ -2910,6 +3081,243 @@ final class ObjectMapperTest extends TestCase
 
         $fiber->resume();
         self::assertInstanceOf(MappingMetadata::class, $fiber->getReturn());
+    }
+
+    #[DataProvider('leafReplayModes')]
+    public function testLeafRejectsReplayedParentGeneratedFailure(bool $prepared, string $callbackKind, bool $nested, bool $consume): void
+    {
+        [$mapper, $cache, $target]                    = $this->leafCallbackRuntime($prepared, $callbackKind);
+        $mappingDefinition                            = new MappingDefinition(CallbackLeafHolderSource::class, CallbackLeafHolderDto::class);
+        $captured                                     = null;
+        $collectionExecutionTrace                     = new CollectionExecutionTrace();
+        $leaf                                         = new CallbackLeafSource(static function() use ($cache, $mappingDefinition, &$captured, $collectionExecutionTrace, $consume): never {
+            self::assertInstanceOf(GeneratedMappingExecutionFailed::class, $captured);
+            if ($consume) {
+                self::assertNull($cache->collectionFailure($captured, $mappingDefinition));
+            }
+            $collectionExecutionTrace->events[] = 'replayed-parent-context';
+
+            throw $captured;
+        });
+        $callbackLeafHolderSource = new CallbackLeafHolderSource($nested ? $leaf : null, [], static function() use ($mapper, $cache, $leaf, $target, $nested, &$captured, $collectionExecutionTrace): void {
+            try {
+                $cache->collectionElementTypeFailure(CallbackLeafHolderSource::class, CallbackLeafHolderDto::class, 'releases', 23, Release::class, new AccessToken('replay-secret'));
+            } catch (GeneratedMappingExecutionFailed $exception) {
+                $captured                           = $exception;
+                $collectionExecutionTrace->events[] = 'captured';
+            }
+            if (! $nested) {
+                $mapper->map($leaf, $target);
+            }
+        });
+        $mapper->warmup();
+
+        try {
+            $mapper->map($callbackLeafHolderSource, CallbackLeafHolderDto::class);
+            self::fail('Expected the replayed failure to be sanitized.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame(['captured', 'replayed-parent-context'], $collectionExecutionTrace->events);
+            self::assertSame('Could not execute mapping ' . $mappingDefinition->key() . '.', $exception->getMessage());
+            self::assertNull($exception->getPrevious());
+        }
+        self::assertInstanceOf(GeneratedMappingExecutionFailed::class, $captured);
+        $replay = new CallbackLeafSource(static function() use ($captured): never {
+            throw $captured;
+        });
+
+        try {
+            $mapper->map($replay, $target);
+            self::fail('Expected replay into a later root to remain sanitized.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame('Could not execute mapping ' . CallbackLeafSource::class . '->' . $target . '.', $exception->getMessage());
+            self::assertNull($exception->getPrevious());
+        }
+        self::assertLeafCannotBorrowParentContext($cache);
+        self::assertSame('recovered', $mapper->map(new CallbackLeafSource(static fn (): string => 'recovered'), $target)->version);
+    }
+
+    /** @return iterable<string, array{bool, string, bool, bool}> */
+    public static function leafReplayModes(): iterable
+    {
+        foreach (self::leafReentryModes() as $name => [$prepared, $callback, $nested]) {
+            foreach ([true, false] as $consume) {
+                yield $name . ($consume ? '-consumed' : '-unconsumed') => [$prepared, $callback, $nested, $consume];
+            }
+        }
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testCollectionLeafRejectsUnconsumedParentGeneratedFailure(bool $reusePreparedMappings): void
+    {
+        [$mapper, $cache]                           = $this->collectionCallbackRuntime(reusePreparedMappings: $reusePreparedMappings);
+        $captured                                   = null;
+        $collectionExecutionTrace                   = new CollectionExecutionTrace();
+        $observedReleaseCollectionsSource           = new ObservedReleaseCollectionsSource([
+            new CallbackRelease(static function() use (&$captured, $collectionExecutionTrace): never {
+                self::assertInstanceOf(GeneratedMappingExecutionFailed::class, $captured);
+                $collectionExecutionTrace->events[] = 'replayed';
+
+                throw $captured;
+            }),
+        ], [], $collectionExecutionTrace, static function() use ($cache, &$captured, $collectionExecutionTrace): void {
+            try {
+                $cache->collectionElementTypeFailure(ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, 'second', 29, Release::class, new AccessToken('collection-replay-secret'));
+            } catch (GeneratedMappingExecutionFailed $exception) {
+                $captured                           = $exception;
+                $collectionExecutionTrace->events[] = 'captured';
+            }
+        });
+        $mapper->warmup();
+
+        try {
+            $mapper->map($observedReleaseCollectionsSource, ObservedReleaseCollectionsDto::class);
+            self::fail('Expected the collection leaf to sanitize the unconsumed parent token.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame(['first', 'captured', 'second', 'replayed'], $collectionExecutionTrace->events);
+            self::assertSame('Could not execute mapping ' . ObservedReleaseCollectionsSource::class . '->' . ObservedReleaseCollectionsDto::class . '.', $exception->getMessage());
+            self::assertNull($exception->getPrevious());
+        }
+        $observedReleaseCollectionsDto = $mapper->map(new ObservedReleaseCollectionsSource([
+            new CallbackRelease(static fn (): string => 'recovered'),
+        ], [new Release('sibling')], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class);
+        self::assertEquals([new ReleaseDto('recovered')], $observedReleaseCollectionsDto->first);
+        self::assertEquals([new ReleaseDto('sibling')], $observedReleaseCollectionsDto->second);
+    }
+
+    /** @return array<string, array{bool}> */
+    public static function collectionCacheModes(): array
+    {
+        return [
+            'default'  => [false],
+            'prepared' => [true],
+        ];
+    }
+
+    #[DataProvider('leafReentryModes')]
+    public function testLeafFibersReleaseInputsAfterThrowOrAbandonment(bool $prepared, string $callbackKind, bool $nested): void
+    {
+        if (function_exists('xdebug_info') && in_array('develop', xdebug_info('mode'), true)) {
+            self::markTestSkipped('Xdebug retains exception arguments; run XDEBUG_MODE=off to verify runtime retention.');
+        }
+        [$mapper, $cache, $target] = $this->leafCallbackRuntime($prepared, $callbackKind);
+        $mapper->warmup();
+
+        foreach (['throw', 'abandon'] as $termination) {
+            $trace               = new CollectionExecutionTrace();
+            $callbackLeafSource  = new CallbackLeafSource(static function() use ($trace): string {
+                try {
+                    Fiber::suspend('leaf');
+
+                    return 'unexpected-resume';
+                } finally {
+                    $trace->events[] = 'unwound';
+                }
+            });
+            $source     = $this->leafCallbackParent($mapper, $callbackLeafSource, $target, $nested);
+            $weakLeaf   = WeakReference::create($callbackLeafSource);
+            $weakSource = WeakReference::create($source);
+            $fiber      = new Fiber(static fn (): CallbackLeafHolderDto => $mapper->map($source, CallbackLeafHolderDto::class));
+            $weakFiber  = WeakReference::create($fiber);
+            self::assertSame('leaf', $fiber->start());
+            unset($callbackLeafSource, $source);
+            self::assertNotNull($weakLeaf->get());
+            self::assertNotNull($weakSource->get());
+
+            if ('throw' === $termination) {
+                try {
+                    $fiber->throw(new RuntimeException('sensitive injected failure'));
+                    self::fail('Expected the injected Fiber failure to escape as a safe mapping error.');
+                } catch (MappingExecutionFailed $exception) {
+                    self::assertSame('Could not execute mapping ' . CallbackLeafHolderSource::class . '->' . CallbackLeafHolderDto::class . '.', $exception->getMessage());
+                    self::assertNull($exception->getPrevious());
+                }
+                self::assertTrue($fiber->isTerminated());
+                unset($exception);
+            }
+            unset($fiber);
+            self::assertSame(['unwound'], $trace->events);
+            self::assertNull($weakFiber->get());
+            self::assertNull($weakLeaf->get());
+            self::assertNull($weakSource->get());
+            self::assertLeafCannotBorrowParentContext($cache);
+            $recovered = $this->leafCallbackParent($mapper, new CallbackLeafSource(static fn (): string => 'leaf'), $target, $nested);
+            self::assertEquals([new ReleaseDto('sibling')], $mapper->map($recovered, CallbackLeafHolderDto::class)->releases);
+        }
+    }
+
+    /** @return iterable<string, array{bool, string, bool}> */
+    public static function leafReentryModes(): iterable
+    {
+        foreach (self::collectionCacheModes() as $mode => [$prepared]) {
+            foreach (['getter', 'transformer', 'constructor'] as $callback) {
+                foreach ([false, true] as $nested) {
+                    yield $mode . '-' . $callback . ($nested ? '-nested' : '-root') => [$prepared, $callback, $nested];
+                }
+            }
+        }
+    }
+
+    private static function assertLeafCannotBorrowParentContext(MapperCache $mapperCache): void
+    {
+        foreach (['nested', 'collection', 'failure'] as $attempt) {
+            $expectedMessage = match ($attempt) {
+                'nested'     => 'Nested mapping dispatch is not an active declared dependency.',
+                'collection' => 'Collection mapping dispatch is not an active declared dependency.',
+                'failure'    => 'Generated collection element validation failed.',
+            };
+
+            try {
+                match ($attempt) {
+                    'nested'     => $mapperCache->mapNested(new Release('sibling'), Release::class, ReleaseDto::class, SourceMatchMode::Exact),
+                    'collection' => $mapperCache->mapCollection([], CallbackLeafHolderSource::class, CallbackLeafHolderDto::class, 'releases', Release::class, ReleaseDto::class, SourceMatchMode::Exact),
+                    'failure'    => $mapperCache->collectionElementTypeFailure(CallbackLeafHolderSource::class, CallbackLeafHolderDto::class, 'releases', 'sensitive-parent-key', Release::class, null),
+                };
+                self::fail('A leaf borrowed parent context: ' . $attempt);
+            } catch (MappingExecutionFailed $exception) {
+                self::assertSame($expectedMessage, $exception->getMessage());
+                self::assertNull($exception->getPrevious());
+            }
+        }
+    }
+
+    /** @param class-string<CallbackLeafDto> $target */
+    private function leafCallbackParent(ObjectMapper $objectMapper, CallbackLeafSource $callbackLeafSource, string $target, bool $nested): CallbackLeafHolderSource
+    {
+        return new CallbackLeafHolderSource($nested ? $callbackLeafSource : null, [new Release('sibling')], $nested ? null : static function() use ($objectMapper, $callbackLeafSource, $target): void {
+            self::assertSame('leaf', $objectMapper->map($callbackLeafSource, $target)->version);
+        });
+    }
+
+    /** @return array{ObjectMapper, MapperCache, class-string<CallbackLeafDto>} */
+    private function leafCallbackRuntime(bool $prepared, string $callbackKind): array
+    {
+        $target                   = CallbackLeafDto::class;
+        $valueTransformerRegistry = new ValueTransformerRegistry([new CallbackLeafTransformer()]);
+        $mappingRegistry          = new MappingRegistry([
+            new MappingDefinition(CallbackLeafSource::class, $target, [
+                'version' => match ($callbackKind) {
+                    'getter'      => MapRule::fromGetter('getVersion'),
+                    'transformer' => MapRule::fromGetter('getCallback')->through(CallbackLeafTransformer::class),
+                    'constructor' => MapRule::fromGetter('getCallback'),
+                    default       => throw new InvalidArgumentException('Unknown leaf callback kind: ' . $callbackKind),
+                },
+            ]),
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new MappingDefinition(CallbackLeafHolderSource::class, CallbackLeafHolderDto::class, [
+                'leaf'     => MapRule::fromGetter('getLeaf')->nested($target),
+                'releases' => MapRule::fromGetter('getReleases')->collection(Release::class, ReleaseDto::class),
+            ]),
+            new MappingDefinition(FiberCollectionFailureSource::class, FiberCollectionFailureDto::class, [
+                'releases' => MapRule::fromGetter('getReleases')->collection(Release::class, ReleaseDto::class),
+            ]),
+        ]);
+        $mapperCache = new MapperCache(
+            new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+            new PhpMapperGenerator(), $this->cacheDirectory, $valueTransformerRegistry,
+            generateOnDemand: true, mappingRegistry: $mappingRegistry, reusePreparedMappings: $prepared,
+        );
+
+        return [new ObjectMapper($mappingRegistry, $mapperCache), $mapperCache, $target];
     }
 
     private function mapper(bool $generateOnDemand, MappingDefinitionInterface ...$definitions): ObjectMapper

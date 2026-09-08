@@ -8,6 +8,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Conventional root and nested leaves avoid structural execution tables, using
+  eligibility recorded during preparation without rescanning warm prepared calls.
+  This change preserves public APIs, generated format `7`, prepared-cache
+  ownership/lifecycle, and default source-file invalidation.
 - Conventional leaf collections, including transformer-backed leaves, bind the
   declared child dependency once per collection in a runtime-owned loop. Child
   execution remains isolated per element, with ordered validation and callbacks,
@@ -26,11 +30,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Leaf benchmarks against `81845e5` with a frozen shared harness: prepared flat
+  mappings improved 1.97–2.47×, getter/transformer leaves 1.88–2.67×, and nested
+  leaves with OPcache 1.19–1.33×. Empty prepared custom collections without
+  OPcache measured 0.953×/0.958× (+0.153/+0.131 µs per call); attribution remains
+  unconfirmed. See [environment, protocol, and limits](README.md#benchmarking-lightweight-leaf-execution).
+- Regression verification passed on PHP 8.2.32, 8.3.32, 8.4.23, and 8.5.8
+  (257 tests / 2712 assertions each), with final `composer check` passing.
 - Collection benchmarks for sizes 0, 1, 100, and 1000 across leaf, structural,
   transformer, direct-custom, and provider-custom children, with default and
   prepared-cache execution, raw timings, items/s and retention probes. The
-  comparison baseline is revision `38f002c` using the identical harness; the
-  separate runtime stages 1–3 remain deferred.
+  comparison baseline is revision `38f002c` using the identical harness. These
+  measurements predate lightweight leaf execution; execution-context and
+  prepared-template stages remain deferred.
 - On PHP 8.5.8 CLI with OPcache on and JIT/coverage off, prepared collections
   of 1000 conventional leaves improved 4.46–5.27× in paired run medians versus
   `38f002c`. Prepared custom/provider throughput was 18–39% lower alongside
@@ -39,6 +51,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- Root, nested, and collection leaf getters, transformers, and constructors run
+  behind an isolation barrier. Replayed parent diagnostics are sanitized even
+  with unconsumed provenance; eight new regression cases fail on the baseline
+  and pass on the candidate. Enclosing scopes restore on success or failure.
 - Custom mapper callbacks and provider resolution no longer inherit an enclosing
   mapping's declared dependency authority. This prevents dispatch of enclosing-only
   siblings and forged collection errors for nested/collection custom mappings

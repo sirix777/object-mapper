@@ -202,7 +202,7 @@ not enter logs.
 
 Conventional leaf elements (including transformer-backed leaves) use a
 runtime-owned collection loop that resolves the declared child dependency once
-per collection. Each attempted element has its own execution scope. Elements
+per collection. Each attempted element executes behind an isolation barrier. Elements
 are validated and mapped in input order, so callbacks for earlier valid items
 still run before a later invalid item fails. Standalone generated mappers keep
 their source-type checks. Children with nested or collection rules, and direct
@@ -409,6 +409,15 @@ this option.
 Mapping failures retain structured pair/parameter diagnostics. Do not add the
 mapped source object or its values to application logs.
 
+Conventional mappings without nested or collection rules now use lightweight
+execution at the root and when reached as leaves. Eligibility is recorded during
+preparation; warm prepared calls do not rescan metadata for this classification.
+Getters, transformers, and target constructors run behind an isolation barrier
+without access to enclosing dependencies or collection diagnostics. Replayed
+parent errors are sanitized, including errors whose provenance was not yet
+consumed. Public APIs, generated format `7`, prepared-cache ownership and worker
+lifecycle, and default source-file invalidation remain unchanged.
+
 ### Benchmarking prepared mappings
 
 Run the included benchmark after dependency installation:
@@ -435,6 +444,54 @@ The hot-path runs retained no additional PHP allocator memory between rounds.
 Run the benchmark on target hardware and compare ratios rather than treating
 these absolute values as a production capacity guarantee.
 
+### Benchmarking lightweight leaf execution
+
+This comparison uses baseline `81845e5`, which already includes the collection
+optimization below. Baseline runs preloaded its original `MapperCache` class;
+both revisions ran the same physical fixture/harness file (SHA-256
+`1384b9374b8287ceb3a82a398027828b084ad82335f9307628d40db8f31c320e`).
+Measurements used PHP 8.5.8 CLI on an Intel Core Ultra 5 135U under Microsoft
+virtualization, pinned to CPU 2 with `taskset`, OPcache on/off, JIT/PCOV off,
+and no active Xdebug modes.
+
+Each workload ran five rounds in baseline/candidate/candidate/baseline (ABBA)
+order, with 10,000 iterations for each leaf workload and 100 for collections:
+
+```sh
+taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --workload=flat --iterations=10000 --rounds=5
+taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --workload=collections --iterations=100 --rounds=5
+```
+
+Repeat the first command with `--workload=getter-transformer` and
+`--workload=nested`, and both with `-d opcache.enable_cli=0`. Collections cover
+sizes 0, 1, 100, and 1000 in default/prepared modes. An extra nested ABBA run used
+10,000 iterations; prepared collection followups used 20,000 empty-collection
+calls and 300 calls at size 1000, including rapid single-workload comparisons.
+Startup, warmup, source construction, and correctness checks were outside timing.
+
+| Prepared workload | Paired candidate/baseline throughput |
+| --- | ---: |
+| Flat DTO, OPcache on/off | 1.97–2.47× |
+| Getter/transformer leaf, OPcache on/off | 1.88–2.67× |
+| Nested leaf, OPcache on (initial and followup) | 1.19–1.33× |
+| 1000-item collection controls, OPcache on (rapid followups) | 1.007–1.037× |
+
+Empty prepared custom collections with OPcache off showed an accepted tradeoff:
+0.953×/0.958× throughput, or +0.153/+0.131 µs per call. Added root dispatch/setup
+is a plausible explanation, but its causal cost was not measured. Other control
+timings were noisy: the initial default nested slowdown did not repeat, and
+identical-code provider runs varied from 0.909× to 1.076×. No per-element
+regression beyond that variability was established. These CLI results imply
+neither zero overhead nor production/FPM capacity.
+
+All repeated-call retention probes reported zero growth. Prepared flat/getter
+peak used-memory deltas fell from 1808/1800 to 96/88 bytes, with unchanged
+prepared warmup retention; flat CPU time per 10,000 calls fell from 16.0–17.0
+to 6.6–8.3 ms. CPU measurements cover only the current PHP process.
+Default warmup retention matched in every pair except custom collections with
+OPcache off: 14,416 → 79,952 bytes in both pairs (+65,536 bytes during warmup,
+with no repeated-call growth); all prepared warmup retention matched.
+
 ### Benchmarking collection execution
 
 The collection workloads cover sizes 0, 1, 100, and 1000 for conventional
@@ -459,9 +516,11 @@ the same updated benchmark harness. Both revisions must load the exact same
 physical benchmark fixture file from the same storage: default-cache mode
 hashes source files, so comparing a temporary copy with a workspace file can
 distort the ratio. Select each revision's library source through its autoloader
-while keeping the benchmark fixture path fixed. The separate lightweight-execution,
-execution-context, and prepared-template plans are deferred; these results
-must not be interpreted as incremental gains over those stages.
+while keeping the benchmark fixture path fixed. These historical collection
+measurements predate lightweight leaf execution; they are not incremental gains
+over it. Execution-context and prepared-template stages remain deferred. See the
+[separate leaf comparison](#benchmarking-lightweight-leaf-execution) for the
+subsequent change against `81845e5`.
 
 On PHP 8.5.8 CLI, Linux x64, with OPcache on, JIT/PCOV off and no active
 Xdebug, two alternating baseline/candidate runs of five rounds each produced

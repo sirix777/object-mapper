@@ -599,6 +599,73 @@ final readonly class CallbackRelease
     }
 }
 
+final readonly class CallbackLeafSource
+{
+    /** @param Closure(): string $callback */
+    public function __construct(private Closure $callback) {}
+
+    /** @return Closure(): string */
+    public function getCallback(): Closure
+    {
+        return $this->callback;
+    }
+
+    public function getVersion(): string
+    {
+        return ($this->callback)();
+    }
+}
+
+final readonly class CallbackLeafTransformer implements ValueTransformerInterface
+{
+    /** @param Closure(): string $value */
+    public function transform(Closure $value): string
+    {
+        return $value();
+    }
+}
+
+final readonly class CallbackLeafDto
+{
+    public string $version;
+
+    /** @param (Closure(): string)|string $version */
+    public function __construct(Closure|string $version)
+    {
+        $this->version = $version instanceof Closure ? $version() : $version;
+    }
+}
+
+final readonly class CallbackLeafHolderSource
+{
+    /**
+     * @param list<Release>        $releases
+     * @param null|Closure(): void $callback
+     */
+    public function __construct(private ?CallbackLeafSource $callbackLeafSource, private array $releases, private ?Closure $callback = null) {}
+
+    public function getLeaf(): ?CallbackLeafSource
+    {
+        if ($this->callback instanceof Closure) {
+            ($this->callback)();
+        }
+
+        return $this->callbackLeafSource;
+    }
+
+    /** @return list<Release> */
+    public function getReleases(): array
+    {
+        return $this->releases;
+    }
+}
+
+final readonly class CallbackLeafHolderDto
+{
+    /** @param list<ReleaseDto> $releases */
+    public function __construct(public ?CallbackLeafDto $leaf, public array $releases) {}
+}
+
 final class CallbackReleaseMapper implements CustomObjectMapperInterface
 {
     public ?Closure $callback = null;
