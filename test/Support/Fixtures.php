@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapperTest\Support;
 
+use Closure;
 use DateTimeInterface;
 use LogicException;
 use RuntimeException;
@@ -567,6 +568,122 @@ final readonly class Release
 final readonly class ReleaseDto
 {
     public function __construct(public string $version) {}
+}
+
+final class CollectionExecutionTrace
+{
+    /** @var list<string> */
+    public array $events = [];
+}
+
+final readonly class ObservedRelease
+{
+    public function __construct(private string $version, private CollectionExecutionTrace $collectionExecutionTrace) {}
+
+    public function getVersion(): string
+    {
+        $this->collectionExecutionTrace->events[] = 'get:' . $this->version;
+
+        return $this->version;
+    }
+}
+
+final readonly class CallbackRelease
+{
+    /** @param Closure(): string $callback */
+    public function __construct(private Closure $callback) {}
+
+    public function getVersion(): string
+    {
+        return ($this->callback)();
+    }
+}
+
+final class CallbackReleaseMapper implements CustomObjectMapperInterface
+{
+    public ?Closure $callback = null;
+    public int $invocations   = 0;
+
+    public function map(object $source): object
+    {
+        ++$this->invocations;
+        if ($this->callback instanceof Closure) {
+            ($this->callback)();
+        }
+
+        if (! $source instanceof CallbackRelease) {
+            throw new RuntimeException('Expected a callback release.');
+        }
+
+        return new ReleaseDto($source->getVersion());
+    }
+}
+
+final class CallbackReleaseProvider implements CustomObjectMapperProviderInterface
+{
+    public ?Closure $callback = null;
+    public int $lookups       = 0;
+
+    public function __construct(private readonly CallbackReleaseMapper $callbackReleaseMapper) {}
+
+    public function get(string $mapperId): CustomObjectMapperInterface
+    {
+        ++$this->lookups;
+        if ($this->callback instanceof Closure) {
+            ($this->callback)();
+        }
+
+        return $this->callbackReleaseMapper;
+    }
+}
+
+final readonly class ObservedReleaseTransformer implements ValueTransformerInterface
+{
+    public function __construct(private CollectionExecutionTrace $collectionExecutionTrace) {}
+
+    public function transform(string $value): string
+    {
+        $this->collectionExecutionTrace->events[] = 'transform:' . $value;
+
+        return $value;
+    }
+}
+
+final readonly class ObservedReleaseCollectionsSource
+{
+    /**
+     * @param null|array<int|string, mixed> $first
+     * @param null|array<int|string, mixed> $second
+     */
+    public function __construct(private ?array $first, private ?array $second, private CollectionExecutionTrace $collectionExecutionTrace, private ?Closure $callback = null) {}
+
+    /** @return null|array<int|string, mixed> */
+    public function getFirst(): ?array
+    {
+        $this->collectionExecutionTrace->events[] = 'first';
+        if ($this->callback instanceof Closure) {
+            ($this->callback)();
+        }
+
+        return $this->first;
+    }
+
+    /** @return null|array<int|string, mixed> */
+    public function getSecond(): ?array
+    {
+        $this->collectionExecutionTrace->events[] = 'second';
+
+        return $this->second;
+    }
+}
+
+final readonly class ObservedReleaseCollectionsDto
+{
+    /**
+     * @param null|list<ReleaseDto> $first
+     * @param null|list<ReleaseDto> $second
+     */
+    public function __construct(public ?array $first, public ?array $second) {}
 }
 
 final readonly class ReleaseCollectionSource

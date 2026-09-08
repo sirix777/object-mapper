@@ -17,6 +17,7 @@ use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
+use Sirix\ObjectMapper\Runtime\CollectionMappingRuntimeInterface;
 use Sirix\ObjectMapper\Runtime\CustomMappingExecutor;
 use Sirix\ObjectMapper\Runtime\GeneratedMappingExecutionFailed;
 use Sirix\ObjectMapper\Runtime\NestedMappingRuntimeInterface;
@@ -68,11 +69,11 @@ use function unlink;
  * @internal
  *
  * @phpstan-type Dependency array{definition: CustomMappingDefinition|MappingDefinition|ProviderCustomMappingDefinition, mapper: GeneratedMapperInterface|null}
- * @phpstan-type CollectionFailureDetails array{source: string, target: string, parameter: string, expected: string}
+ * @phpstan-type CollectionFailureDetails array{source: string, target: string, parameter: string, expected: string, elementTarget: class-string, sourceMatch: SourceMatchMode}
  * @phpstan-type PreparedMapping array{metadata: MappingMetadata, cacheKey: string, mapper: GeneratedMapperInterface}
  * @phpstan-type Scope array{definition: MappingDefinition, source: string, target: string, execution: object, dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}
  */
-final class MapperCache implements NestedMappingRuntimeInterface
+final class MapperCache implements NestedMappingRuntimeInterface, CollectionMappingRuntimeInterface
 {
     /** @var array<string, GeneratedMapperInterface> */
     private array $mappers = [];
@@ -229,9 +230,9 @@ final class MapperCache implements NestedMappingRuntimeInterface
 
             $mapped = $this->executeConventional($mappingDefinition, $value, $generatedMapper);
         } elseif ($mappingDefinition instanceof CustomMappingDefinition) {
-            $mapped = $this->customMappingExecutor->map($mappingDefinition, $value);
+            $mapped = $this->mapCustom($mappingDefinition, $value, $this->customMappingExecutor);
         } elseif ($mappingDefinition instanceof ProviderCustomMappingDefinition) {
-            $mapped = $this->customMappingExecutor->map($mappingDefinition, $value);
+            $mapped = $this->mapCustom($mappingDefinition, $value, $this->customMappingExecutor);
         } else {
             throw new MappingCompilationFailed(sprintf(
                 'Nested mapping %s has an unsupported definition type %s.',
@@ -254,6 +255,83 @@ final class MapperCache implements NestedMappingRuntimeInterface
                 $mapped::class,
                 $target,
             ));
+        }
+
+        return $mapped;
+    }
+
+    public function mapCollection(
+        array $values,
+        string $source,
+        string $target,
+        string $parameter,
+        string $elementSource,
+        string $elementTarget,
+        SourceMatchMode $sourceMatchMode,
+    ): ?array {
+        $parentScopes = $this->scopes();
+        $scope        = [] === $parentScopes ? null : $parentScopes[array_key_last($parentScopes)];
+        $collection   = $scope['collections'][$this->collectionKeyId($parameter, $elementSource)] ?? null;
+        if (null === $scope || null === $collection
+            || $scope['source'] !== $source || $scope['target'] !== $target
+            || $collection['elementTarget'] !== $elementTarget
+            || $collection['sourceMatch'] !== $sourceMatchMode) {
+            throw new MappingExecutionFailed('Collection mapping dispatch is not an active declared dependency.');
+        }
+
+        $dependency = $scope['dependencies'][$this->dependencyKey($elementSource, $elementTarget)] ?? null;
+        if (null === $dependency) {
+            throw new MappingExecutionFailed('Collection mapping dispatch is not an active declared dependency.');
+        }
+
+        $definition = $dependency['definition'];
+        if (! $definition instanceof MappingDefinition) {
+            return null;
+        }
+
+        $childMappings = $this->executionMappings[$scope['execution']][$definition->key()] ?? null;
+        if (null === $childMappings || [] !== $childMappings['dependencies'] || [] !== $childMappings['collections']) {
+            return null;
+        }
+
+        $mapper = $dependency['mapper'];
+        if (! $mapper instanceof GeneratedMapperInterface) {
+            throw new MappingCompilationFailed('Collection mapping dependency has no generated mapper.');
+        }
+
+        // This immutable child frame is local to this invocation. Each item enters
+        // it only after its parent collection boundary has validated the element.
+        $childScopes   = $parentScopes;
+        $childScopes[] = [
+            'definition' => $definition,
+            'source'     => $definition->source,
+            'target'     => $definition->target,
+            'execution'  => $scope['execution'],
+            ...$childMappings,
+        ];
+        $mapped = [];
+        foreach ($values as $key => $element) {
+            if (! is_object($element) || ! SourceMatcher::matches($element, $elementSource, $sourceMatchMode)) {
+                $this->collectionElementTypeFailure($source, $target, $parameter, $key, $elementSource, $element);
+            }
+
+            $this->saveScopes($childScopes);
+
+            try {
+                $result = $mapper->map($element);
+            } catch (GeneratedMappingExecutionFailed $exception) {
+                throw $exception;
+            } catch (Throwable) {
+                throw $this->executionFailure($definition);
+            } finally {
+                $this->saveScopes($parentScopes);
+            }
+
+            if (! $result instanceof $elementTarget) {
+                throw new MappingCompilationFailed('Collection mapping dependency returned an invalid target.');
+            }
+
+            $mapped[] = $result;
         }
 
         return $mapped;
@@ -306,6 +384,28 @@ final class MapperCache implements NestedMappingRuntimeInterface
             $details['expected'],
             $details['actualType'],
         );
+    }
+
+    /** @internal Runs custom roots and children without inheriting generated authority. */
+    public function mapCustom(
+        CustomMappingDefinition|ProviderCustomMappingDefinition $mappingDefinition,
+        object $value,
+        CustomMappingExecutor $customMappingExecutor,
+    ): object {
+        if (! SourceMatcher::matches($value, $mappingDefinition->source(), SourceMatcher::modeFor($mappingDefinition))) {
+            throw new MappingExecutionFailed(sprintf('Could not execute mapping %s.', $mappingDefinition->key()));
+        }
+
+        $scopes = $this->scopes();
+        // Custom mappings declare no generated dependencies. Hide the parent's
+        // authority from both provider resolution and the mapper's callbacks.
+        $this->saveScopes([]);
+
+        try {
+            return $customMappingExecutor->map($mappingDefinition, $value);
+        } finally {
+            $this->saveScopes($scopes);
+        }
     }
 
     /**
@@ -485,10 +585,12 @@ final class MapperCache implements NestedMappingRuntimeInterface
 
             if ('collection' === $nested->operation && null !== $nested->elementSource) {
                 $collections[$this->collectionKeyId($targetParameter->name, $nested->elementSource)] = [
-                    'source'    => $mappingMetadata->source,
-                    'target'    => $mappingMetadata->target,
-                    'parameter' => $targetParameter->name,
-                    'expected'  => $nested->elementSource,
+                    'source'        => $mappingMetadata->source,
+                    'target'        => $mappingMetadata->target,
+                    'parameter'     => $targetParameter->name,
+                    'expected'      => $nested->elementSource,
+                    'elementTarget' => $nested->target,
+                    'sourceMatch'   => $nested->sourceMatch,
                 ];
             }
         }

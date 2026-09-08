@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Conventional leaf collections, including transformer-backed leaves, bind the
+  declared child dependency once per collection in a runtime-owned loop. Child
+  execution remains isolated per element, with ordered validation and callbacks,
+  unchanged null/list semantics, exact/Cycle matching, and sanitized input keys.
+  Structural and direct/provider-custom children retain generated per-element
+  dispatch; providers still resolve once per attempted invocation.
+- Generated code optionally uses the internal `CollectionMappingRuntimeInterface`;
+  existing `NestedMappingRuntimeInterface` implementations and the public
+  `ObjectMapper::map()` entry remain compatible. No reusable binding handle or
+  unchecked public mapper entry is exposed.
+- Generated-mapper cache format changed to `7`. Deploy code and registrations,
+  rotate the old owner-only cache, and warm the new `0700` cache as its runtime
+  owner before traffic. Format-6 files are not reused; generated files remain
+  `0600`. Restart or reload all long-running workers, including those using
+  prepared-mapping reuse.
+
+### Added
+
+- Collection benchmarks for sizes 0, 1, 100, and 1000 across leaf, structural,
+  transformer, direct-custom, and provider-custom children, with default and
+  prepared-cache execution, raw timings, items/s and retention probes. The
+  comparison baseline is revision `38f002c` using the identical harness; the
+  separate runtime stages 1–3 remain deferred.
+- On PHP 8.5.8 CLI with OPcache on and JIT/coverage off, prepared collections
+  of 1000 conventional leaves improved 4.46–5.27× in paired run medians versus
+  `38f002c`. Prepared custom/provider throughput was 18–39% lower alongside
+  the required callback isolation fix; noisy controls prevent attributing the
+  whole difference to isolation. See the [measurement protocol and results](README.md#benchmarking-collection-execution).
+
+### Security
+
+- Custom mapper callbacks and provider resolution no longer inherit an enclosing
+  mapping's declared dependency authority. This prevents dispatch of enclosing-only
+  siblings and forged collection errors for nested/collection custom mappings
+  and independent custom roots invoked from a callback. Enclosing scope is
+  restored on success or failure; public root mapping and its separately wired
+  provider remain available.
+
 ## [0.8.0] - 2026-08-31
 
 ### Added

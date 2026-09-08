@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Sirix\ObjectMapperTest\Unit;
 
+use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
@@ -12,6 +13,7 @@ use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Generator\ConstantValueExporter;
+use Sirix\ObjectMapper\Generator\GeneratedMapperInterface;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
 use Sirix\ObjectMapper\Metadata\ConstantValueMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
@@ -20,6 +22,7 @@ use Sirix\ObjectMapper\Metadata\NestedMappingMetadata;
 use Sirix\ObjectMapper\Metadata\TargetParameter;
 use Sirix\ObjectMapper\Metadata\TransformerMetadata;
 use Sirix\ObjectMapper\Runtime\MappingRegistry;
+use Sirix\ObjectMapper\Runtime\NestedMappingRuntimeInterface;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use Sirix\ObjectMapperTest\Support\AccessToken;
 use Sirix\ObjectMapperTest\Support\AlternativeRelease;
@@ -62,6 +65,7 @@ use function array_unique;
 use function hash;
 use function json_encode;
 use function str_repeat;
+use function substr;
 
 #[CoversClass(PhpMapperGenerator::class)]
 final class PhpMapperGeneratorTest extends TestCase
@@ -128,7 +132,7 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertSame($generated, $phpMapperGenerator->generate($mappingMetadata, $key));
     }
 
-    public function testItsCacheKeyDistinguishesConstantTypesAndInvalidatesFormatFive(): void
+    public function testItsCacheKeyDistinguishesConstantTypesAndInvalidatesFormatSix(): void
     {
         $mappingMetadataFactory   = new MappingMetadataFactory();
         $phpMapperGenerator       = new PhpMapperGenerator();
@@ -147,11 +151,11 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertCount(4, array_unique($keys));
         $mappingMetadata            = $mappingMetadataFactory->create(new MappingDefinition(ConventionalSource::class, ConventionalTarget::class));
         $reflectionMethod           = new ReflectionMethod(PhpMapperGenerator::class, 'normalizedMetadata');
-        $formatFive                 = $reflectionMethod->invoke($phpMapperGenerator, $mappingMetadata);
-        $formatFive['format']       = '5';
+        $formatSix                  = $reflectionMethod->invoke($phpMapperGenerator, $mappingMetadata);
+        $formatSix['format']        = '6';
 
         self::assertNotSame(
-            hash('sha256', json_encode($formatFive, JSON_THROW_ON_ERROR)),
+            hash('sha256', json_encode($formatSix, JSON_THROW_ON_ERROR)),
             $phpMapperGenerator->cacheKey($mappingMetadata),
         );
     }
@@ -342,6 +346,47 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertStringContainsString('$mapped[] = $this->nestedMappings->mapNested($element, \Sirix\ObjectMapperTest\Support\Release::class, \Sirix\ObjectMapperTest\Support\ReleaseDto::class, \Sirix\ObjectMapper\Definition\SourceMatchMode::Exact);', $collectionCode);
         self::assertStringContainsString('SourceMatcher::matches($element, \Sirix\ObjectMapperTest\Support\Release::class, \Sirix\ObjectMapper\Definition\SourceMatchMode::Exact)', $collectionCode);
         self::assertStringContainsString('collectionElementTypeFailure(', $collectionCode);
+        self::assertStringContainsString('instanceof \Sirix\ObjectMapper\Runtime\CollectionMappingRuntimeInterface', $collectionCode);
+        self::assertStringContainsString('->mapCollection($values,', $collectionCode);
+    }
+
+    public function testStandaloneCollectionMapperSupportsLegacyRuntimeAndValidatesItsSource(): void
+    {
+        $child  = new MappingDefinition(Release::class, ReleaseDto::class);
+        $parent = new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+            'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+        ]);
+        $mappingMetadata    = (new MappingMetadataFactory(mappingRegistry: new MappingRegistry([$child, $parent])))->create($parent);
+        $phpMapperGenerator = new PhpMapperGenerator();
+        $key                = hash('sha256', 'standalone-legacy-collection-runtime');
+        eval(substr($phpMapperGenerator->generate($mappingMetadata, $key), 5));
+        $runtime = new class implements NestedMappingRuntimeInterface {
+            public int $calls = 0;
+
+            public function mapNested(object $value, string $source, string $target, SourceMatchMode $sourceMatchMode): object
+            {
+                ++$this->calls;
+                TestCase::assertInstanceOf(Release::class, $value);
+
+                return new ReleaseDto($value->version);
+            }
+
+            public function collectionElementTypeFailure(string $source, string $target, string $parameter, int|string $key, string $expected, mixed $actual): never
+            {
+                throw new InvalidArgumentException('Invalid element.');
+            }
+        };
+        $class  = $phpMapperGenerator->className($key);
+        $mapper = new $class(new ValueTransformerRegistry(), $runtime);
+        self::assertInstanceOf(GeneratedMapperInterface::class, $mapper);
+        self::assertEquals(new ReleaseCollectionDto([new ReleaseDto('1')]), $mapper->map(new ReleaseCollectionSource([
+            'original' => new Release('1'),
+        ])));
+        self::assertEquals(new ReleaseCollectionDto([]), $mapper->map(new ReleaseCollectionSource([])));
+        self::assertSame(1, $runtime->calls);
+
+        $this->expectException(InvalidArgumentException::class);
+        $mapper->map(new Release('wrong root'));
     }
 
     public function testItGeneratesExplicitNullableNestedGuardAndChangesKeysForStructuralOperations(): void

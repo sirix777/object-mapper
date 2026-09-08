@@ -3,6 +3,12 @@
 declare(strict_types=1);
 
 use Sirix\ObjectMapper\Definition\MappingDefinition;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
+use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
+use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
+use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
+use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Generator\MapperCache;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
@@ -13,11 +19,16 @@ use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 
 require \dirname(__DIR__) . '/vendor/autoload.php';
 
-const SIMPLE_ITERATIONS     = 20_000;
-const NESTED_ITERATIONS     = 10_000;
-const COLLECTION_ITERATIONS = 100;
+$options = \getopt('', ['workload:', 'iterations:', 'rounds:']);
+$workload = $options['workload'] ?? 'all';
+if (! \in_array($workload, ['all', 'collections', 'legacy'], true)) {
+    throw new InvalidArgumentException('Workload must be all, collections, or legacy.');
+}
+\define('SIMPLE_ITERATIONS', \benchmarkOption($options, 'iterations', 20_000, 1_000_000));
+\define('NESTED_ITERATIONS', \benchmarkOption($options, 'iterations', 10_000, 1_000_000));
+\define('COLLECTION_ITERATIONS', \benchmarkOption($options, 'iterations', 100, 1_000_000));
 const COLLECTION_SIZE       = 100;
-const ROUNDS                = 5;
+\define('ROUNDS', \benchmarkOption($options, 'rounds', 5, 100));
 
 final readonly class BenchmarkSimpleSource
 {
@@ -51,14 +62,48 @@ final readonly class BenchmarkNestedTarget
 
 final readonly class BenchmarkCollectionSource
 {
-    /** @param list<BenchmarkChildSource> $children */
+    /** @param list<BenchmarkChildSource|BenchmarkNestedSource> $children */
     public function __construct(public array $children) {}
 }
 
 final readonly class BenchmarkCollectionTarget
 {
-    /** @param list<BenchmarkChildTarget> $children */
+    /** @param list<BenchmarkChildTarget|BenchmarkNestedTarget> $children */
     public function __construct(public array $children) {}
+}
+
+final class BenchmarkTransformer implements ValueTransformerInterface
+{
+    public function transform(string $value): string
+    {
+        return \strtoupper($value);
+    }
+}
+
+final class BenchmarkCustomMapper implements CustomObjectMapperInterface
+{
+    public function map(object $source): object
+    {
+        if (! $source instanceof BenchmarkChildSource) {
+            throw new InvalidArgumentException('Unexpected benchmark source.');
+        }
+
+        return new BenchmarkChildTarget($source->value);
+    }
+}
+
+final readonly class BenchmarkProvider implements CustomObjectMapperProviderInterface
+{
+    public function __construct(private BenchmarkCustomMapper $mapper) {}
+
+    public function get(string $mapperId): CustomObjectMapperInterface
+    {
+        if ('benchmark-child' !== $mapperId) {
+            throw new InvalidArgumentException('Unknown benchmark mapper.');
+        }
+
+        return $this->mapper;
+    }
 }
 
 $cacheDirectory = \sys_get_temp_dir() . '/object-mapper-benchmark-' . \bin2hex(\random_bytes(8));
@@ -100,7 +145,7 @@ try {
     }
 
     $collectionSource = new BenchmarkCollectionSource($children);
-    $metrics          = [
+    $metrics          = 'collections' === $workload ? [] : [
         'direct_constructor'       => \benchmark(
             static fn (): BenchmarkSimpleTarget => new BenchmarkSimpleTarget($simpleSource->id, $simpleSource->name, $simpleSource->active),
             SIMPLE_ITERATIONS,
@@ -141,11 +186,15 @@ try {
         'warmup_memory'            => $warmupMemory,
     ];
 
-    foreach (['default_mapping', 'prepared_mapping'] as $mode) {
+    foreach ('collections' === $workload ? [] : ['default_mapping', 'prepared_mapping'] as $mode) {
         $metrics[$mode]['collection']['items_per_second'] = \round(
             $metrics[$mode]['collection']['operations_per_second'] * COLLECTION_SIZE,
             1,
         );
+    }
+
+    if ('legacy' !== $workload) {
+        $metrics['collection_matrix'] = \benchmarkCollections($cacheDirectory);
     }
 
     echo \json_encode([
@@ -154,6 +203,12 @@ try {
         'sapi'            => PHP_SAPI,
         'opcache_cli'     => (bool) \ini_get('opcache.enable_cli'),
         'jit_buffer_size' => (int) \ini_get('opcache.jit_buffer_size'),
+        'jit'             => \ini_get('opcache.jit'),
+        'opcache_status'  => \function_exists('opcache_get_status') ? \opcache_get_status(false) : false,
+        'extensions'      => \get_loaded_extensions(),
+        'pcov_enabled'    => (bool) \ini_get('pcov.enabled'),
+        'pcov_directory'  => \ini_get('pcov.directory'),
+        'xdebug_modes'    => \function_exists('xdebug_info') ? \xdebug_info('mode') : [],
         'cpu_clock'       => \function_exists('getrusage') ? 'process_getrusage' : 'unavailable',
         'rounds'          => ROUNDS,
     ],
@@ -162,10 +217,12 @@ try {
         'memory' => 'PHP allocator; per-round deltas are measured after warmup. Prepared warmup memory is incremental after default warmup.',
     ],
         'workload'    => [
+            'selection'             => $workload,
             'simple_iterations'     => SIMPLE_ITERATIONS,
             'nested_iterations'     => NESTED_ITERATIONS,
             'collection_iterations' => COLLECTION_ITERATIONS,
             'collection_size'       => COLLECTION_SIZE,
+            'collection_sizes'      => [0, 1, 100, 1000],
         ],
         'metrics'     => $metrics,
     ], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR) . PHP_EOL;
@@ -174,7 +231,7 @@ try {
 }
 
 /**
- * @param list<MappingDefinition> $definitions
+ * @param list<MappingDefinitionInterface> $definitions
  */
 function createMapper(string $cacheDirectory, array $definitions): ObjectMapper
 {
@@ -182,13 +239,13 @@ function createMapper(string $cacheDirectory, array $definitions): ObjectMapper
 }
 
 /**
- * @param list<MappingDefinition> $definitions
+ * @param list<MappingDefinitionInterface> $definitions
  *
  * @return array{mapper: ObjectMapper, cache: MapperCache}
  */
-function createMapperAndCache(string $cacheDirectory, array $definitions, bool $reusePreparedMappings = false): array
+function createMapperAndCache(string $cacheDirectory, array $definitions, bool $reusePreparedMappings = false, ?CustomObjectMapperProviderInterface $provider = null, ?ValueTransformerRegistry $transformers = null): array
 {
-    $transformers = new ValueTransformerRegistry();
+    $transformers ??= new ValueTransformerRegistry();
     $registry     = new MappingRegistry($definitions);
     $cache        = new MapperCache(
         new MappingMetadataFactory($transformers, mappingRegistry: $registry),
@@ -197,13 +254,106 @@ function createMapperAndCache(string $cacheDirectory, array $definitions, bool $
         $transformers,
         true,
         $registry,
+        customObjectMapperProvider: $provider,
         reusePreparedMappings: $reusePreparedMappings,
     );
 
     return [
-        'mapper' => new ObjectMapper($registry, $cache),
+        'mapper' => new ObjectMapper($registry, $cache, $provider),
         'cache'  => $cache,
     ];
+}
+
+/** @param array<string, mixed> $options */
+function benchmarkOption(array $options, string $name, int $default, int $maximum): int
+{
+    if (! \array_key_exists($name, $options)) {
+        return $default;
+    }
+
+    $value = \filter_var($options[$name], FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => $maximum]]);
+    if (false === $value) {
+        throw new InvalidArgumentException(\sprintf('--%s must be an integer between 1 and %d.', $name, $maximum));
+    }
+
+    return $value;
+}
+
+/** @return array<string, mixed> */
+function benchmarkCollections(string $cacheDirectory): array
+{
+    $results = [];
+    $customMapper = new BenchmarkCustomMapper();
+    $provider = new BenchmarkProvider($customMapper);
+    $transformers = new ValueTransformerRegistry([new BenchmarkTransformer()]);
+    foreach (['leaf', 'structural', 'transformer', 'custom', 'provider'] as $shape) {
+        $elementSource = 'structural' === $shape ? BenchmarkNestedSource::class : BenchmarkChildSource::class;
+        $elementTarget = 'structural' === $shape ? BenchmarkNestedTarget::class : BenchmarkChildTarget::class;
+        $childDefinition = match ($shape) {
+            'transformer' => new MappingDefinition(BenchmarkChildSource::class, BenchmarkChildTarget::class, [
+                'value' => MapRule::from('value')->through(BenchmarkTransformer::class),
+            ]),
+            'custom' => new CustomMappingDefinition(BenchmarkChildSource::class, BenchmarkChildTarget::class, $customMapper),
+            'provider' => new ProviderCustomMappingDefinition(BenchmarkChildSource::class, BenchmarkChildTarget::class, 'benchmark-child'),
+            default => new MappingDefinition(BenchmarkChildSource::class, BenchmarkChildTarget::class),
+        };
+        $definitions = [
+            $childDefinition,
+            new MappingDefinition(BenchmarkCollectionSource::class, BenchmarkCollectionTarget::class, [
+                'children' => MapRule::from('children')->collection($elementSource, $elementTarget),
+            ]),
+        ];
+        if ('structural' === $shape) {
+            $definitions[] = new MappingDefinition(BenchmarkNestedSource::class, BenchmarkNestedTarget::class, [
+                'child' => MapRule::from('child')->nested(BenchmarkChildTarget::class),
+            ]);
+        }
+
+        foreach ([false, true] as $prepared) {
+            $mode = $prepared ? 'prepared' : 'default';
+            $memoryBefore = \memory_get_usage();
+            $mapper = \createMapperAndCache($cacheDirectory, $definitions, $prepared, $provider, $transformers)['mapper'];
+            $mapper->warmup();
+            $results[$shape][$mode]['warmup_retained_memory_delta_bytes'] = \memory_get_usage() - $memoryBefore;
+
+            foreach ([0, 1, 100, 1000] as $size) {
+                $children = [];
+                $expected = [];
+                for ($index = 0; $index < $size; ++$index) {
+                    $value = 'child-' . $index;
+                    $child = new BenchmarkChildSource($value);
+                    $children[] = 'structural' === $shape ? new BenchmarkNestedSource($child) : $child;
+                    $target = new BenchmarkChildTarget('transformer' === $shape ? \strtoupper($value) : $value);
+                    $expected[] = 'structural' === $shape ? new BenchmarkNestedTarget($target) : $target;
+                }
+                $source = new BenchmarkCollectionSource($children);
+                $operation = static fn (): object => $mapper->map($source, BenchmarkCollectionTarget::class);
+                if ($operation() != new BenchmarkCollectionTarget($expected)) {
+                    throw new RuntimeException('Collection benchmark correctness check failed.');
+                }
+                $measurement = \benchmark($operation, COLLECTION_ITERATIONS);
+                $measurement['collections_per_second'] = $measurement['operations_per_second'];
+                $measurement['items_per_second'] = \round($measurement['operations_per_second'] * $size, 1);
+                // Two successive blocks expose retention across repeated calls, outside timed rounds.
+                $retention = [];
+                for ($block = 0; $block < 2; ++$block) {
+                    \gc_collect_cycles();
+                    $before = \memory_get_usage();
+                    for ($index = 0; $index < COLLECTION_ITERATIONS; ++$index) {
+                        $operation();
+                    }
+                    \gc_collect_cycles();
+                    $retention[] = \memory_get_usage() - $before;
+                }
+                $measurement['repeated_call_retained_memory_deltas_bytes'] = $retention;
+                $results[$shape][$mode]['sizes'][$size] = $measurement;
+                unset($operation);
+            }
+            unset($mapper);
+        }
+    }
+
+    return $results;
 }
 
 /**
@@ -211,6 +361,7 @@ function createMapperAndCache(string $cacheDirectory, array $definitions, bool $
  *
  * @return array{
  *     median_ms: float,
+ *     round_ms: list<float>,
  *     operations_per_second: float,
  *     median_user_cpu_ms: float|null,
  *     median_system_cpu_ms: float|null,
@@ -271,6 +422,7 @@ function benchmark(Closure $operation, int $iterations): array
 
     return [
         'median_ms'             => \round($median, 3),
+        'round_ms'              => $durations,
         'operations_per_second' => \round($iterations / ($median / 1_000), 1),
         'median_user_cpu_ms'    => null === $medianUserCpu ? null : \round($medianUserCpu, 3),
         'median_system_cpu_ms'  => null === $medianSystemCpu ? null : \round($medianSystemCpu, 3),

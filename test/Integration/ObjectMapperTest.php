@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use Fiber;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 use RuntimeException;
@@ -39,6 +40,10 @@ use Sirix\ObjectMapper\Runtime\ObjectMapper;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use Sirix\ObjectMapperTest\Support\AccessToken;
 use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
+use Sirix\ObjectMapperTest\Support\CallbackRelease;
+use Sirix\ObjectMapperTest\Support\CallbackReleaseMapper;
+use Sirix\ObjectMapperTest\Support\CallbackReleaseProvider;
+use Sirix\ObjectMapperTest\Support\CollectionExecutionTrace;
 use Sirix\ObjectMapperTest\Support\ConstantSource;
 use Sirix\ObjectMapperTest\Support\ConstantTarget;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
@@ -81,6 +86,10 @@ use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionDto;
 use Sirix\ObjectMapperTest\Support\NullableReleaseCollectionSource;
 use Sirix\ObjectMapperTest\Support\NullableTokenHolderDto;
 use Sirix\ObjectMapperTest\Support\NullableTokenHolderSource;
+use Sirix\ObjectMapperTest\Support\ObservedRelease;
+use Sirix\ObjectMapperTest\Support\ObservedReleaseCollectionsDto;
+use Sirix\ObjectMapperTest\Support\ObservedReleaseCollectionsSource;
+use Sirix\ObjectMapperTest\Support\ObservedReleaseTransformer;
 use Sirix\ObjectMapperTest\Support\PrivateSource;
 use Sirix\ObjectMapperTest\Support\ProfileSource;
 use Sirix\ObjectMapperTest\Support\ProfileTarget;
@@ -116,6 +125,7 @@ use Sirix\ObjectMapperTest\Support\WrongParentCycleProxy;
 use stdClass;
 
 use Throwable;
+use WeakReference;
 
 use function array_keys;
 use function array_map;
@@ -126,9 +136,11 @@ use function class_exists;
 use function count;
 use function file_get_contents;
 use function fileperms;
+use function function_exists;
 use function glob;
 use function hash;
 use function implode;
+use function in_array;
 use function is_dir;
 use function mkdir;
 use function random_bytes;
@@ -140,6 +152,7 @@ use function substr;
 use function substr_count;
 use function sys_get_temp_dir;
 use function unlink;
+use function xdebug_info;
 
 #[CoversClass(ObjectMapper::class)]
 final class ObjectMapperTest extends TestCase
@@ -689,7 +702,7 @@ final class ObjectMapperTest extends TestCase
         $mappingDefinition = new MappingDefinition(DefaultSource::class, DefaultTarget::class);
         $mapper            = $this->mapper(false, $mappingDefinition);
 
-        self::assertSame('6', (new ReflectionClass(PhpMapperGenerator::class))->getConstant('FORMAT_VERSION'));
+        self::assertSame('7', (new ReflectionClass(PhpMapperGenerator::class))->getConstant('FORMAT_VERSION'));
         self::assertSame(DefaultSource::class, $mappingDefinition->source());
         self::assertSame([$mappingDefinition->key()], $mapper->warmup());
         self::assertSame('default', $mapper->map(new DefaultSource(1), DefaultTarget::class)->label);
@@ -1272,6 +1285,404 @@ final class ObjectMapperTest extends TestCase
         self::assertSame([0, 1], array_keys($releaseCollectionDto->releases));
         self::assertNull($mapper->map(new NullableTokenHolderSource(null), NullableTokenHolderDto::class)->token);
         self::assertNull($mapper->map(new NullableReleaseCollectionSource(null), NullableReleaseCollectionDto::class)->releases);
+    }
+
+    public function testCollectionValidationIsInterleavedWithGettersAndTransformers(): void
+    {
+        foreach ([0, 1, 2] as $invalidPosition) {
+            $trace  = new CollectionExecutionTrace();
+            $mapper = $this->mapperWithTransformers(
+                true,
+                new ValueTransformerRegistry([new ObservedReleaseTransformer($trace)]),
+                new MappingDefinition(ObservedRelease::class, ReleaseDto::class, [
+                    'version' => MapRule::fromGetter('getVersion')->through(ObservedReleaseTransformer::class),
+                ]),
+                new MappingDefinition(ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, [
+                    'first'  => MapRule::fromGetter('getFirst')->collection(ObservedRelease::class, ReleaseDto::class),
+                    'second' => MapRule::fromGetter('getSecond')->collection(ObservedRelease::class, ReleaseDto::class),
+                ]),
+            );
+            $items          = [];
+            $expectedEvents = ['first', 'second'];
+            foreach ([0, 1, 2] as $position) {
+                $items[$position + 10] = $position === $invalidPosition ? null : new ObservedRelease((string) $position, $trace);
+                if ($position < $invalidPosition) {
+                    $expectedEvents[] = 'get:' . $position;
+                    $expectedEvents[] = 'transform:' . $position;
+                }
+            }
+
+            try {
+                $mapper->map(new ObservedReleaseCollectionsSource($items, [], $trace), ObservedReleaseCollectionsDto::class);
+                self::fail('Expected an invalid element to stop collection execution.');
+            } catch (MappingExecutionFailed $exception) {
+                self::assertStringContainsString('parameter "first"', $exception->getMessage());
+                self::assertStringContainsString('integer key ' . ($invalidPosition + 10), $exception->getMessage());
+                self::assertSame($expectedEvents, $trace->events);
+            }
+        }
+    }
+
+    public function testCollectionsSharingAChildPairKeepParameterOrderAndNullSemantics(): void
+    {
+        $collectionExecutionTrace  = new CollectionExecutionTrace();
+        $objectMapper              = $this->mapperWithTransformers(
+            true,
+            new ValueTransformerRegistry([new ObservedReleaseTransformer($collectionExecutionTrace)]),
+            new MappingDefinition(ObservedRelease::class, ReleaseDto::class, [
+                'version' => MapRule::fromGetter('getVersion')->through(ObservedReleaseTransformer::class),
+            ]),
+            new MappingDefinition(ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, [
+                'first'  => MapRule::fromGetter('getFirst')->collection(ObservedRelease::class, ReleaseDto::class),
+                'second' => MapRule::fromGetter('getSecond')->collection(ObservedRelease::class, ReleaseDto::class),
+            ]),
+        );
+
+        $result = $objectMapper->map(new ObservedReleaseCollectionsSource(null, [], $collectionExecutionTrace), ObservedReleaseCollectionsDto::class);
+        self::assertNull($result->first);
+        self::assertSame([], $result->second);
+        self::assertSame(['first', 'second'], $collectionExecutionTrace->events);
+
+        $collectionExecutionTrace->events = [];
+        $result                           = $objectMapper->map(new ObservedReleaseCollectionsSource(
+            [
+                'sensitive-key' => new ObservedRelease('a', $collectionExecutionTrace),
+            ],
+            [
+                -5 => new ObservedRelease('b', $collectionExecutionTrace),
+            ],
+            $collectionExecutionTrace,
+        ), ObservedReleaseCollectionsDto::class);
+        self::assertEquals([new ReleaseDto('a')], $result->first);
+        self::assertEquals([new ReleaseDto('b')], $result->second);
+        self::assertSame(['first', 'second', 'get:a', 'transform:a', 'get:b', 'transform:b'], $collectionExecutionTrace->events);
+
+        $collectionExecutionTrace->events = [];
+
+        try {
+            $objectMapper->map(new ObservedReleaseCollectionsSource(
+                [new ObservedRelease('a', $collectionExecutionTrace)],
+                [
+                    "sensitive-key\n" => false,
+                ],
+                $collectionExecutionTrace,
+            ), ObservedReleaseCollectionsDto::class);
+            self::fail('Expected the second parameter to fail.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertStringContainsString('parameter "second"', $exception->getMessage());
+            self::assertStringNotContainsString('sensitive-key', $exception->getMessage());
+            self::assertSame(['first', 'second', 'get:a', 'transform:a'], $collectionExecutionTrace->events);
+        }
+    }
+
+    public function testProviderCollectionsResolveOnlyElementsBeforeAnInvalidElement(): void
+    {
+        foreach ([0, 1, 2] as $invalidPosition) {
+            $childMapper = new RecordingProviderCustomMapper();
+            $provider    = new RecordingCustomMapperProvider([
+                'child' => $childMapper,
+            ]);
+            $mapper = $this->mapperWithProvider(
+                true,
+                $provider,
+                new ProviderCustomMappingDefinition(Release::class, ReleaseDto::class, 'child'),
+                new MappingDefinition(ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, [
+                    'first'  => MapRule::fromGetter('getFirst')->collection(Release::class, ReleaseDto::class),
+                    'second' => MapRule::fromGetter('getSecond')->collection(Release::class, ReleaseDto::class),
+                ]),
+            );
+            $items                   = [new Release('a'), new Release('b'), new Release('c')];
+            $items[$invalidPosition] = new stdClass();
+
+            try {
+                $mapper->map(new ObservedReleaseCollectionsSource($items, [], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class);
+                self::fail('Expected the invalid provider collection element to fail.');
+            } catch (MappingExecutionFailed) {
+                self::assertSame($invalidPosition, $provider->lookups);
+                self::assertSame($invalidPosition, $childMapper->invocations);
+            }
+        }
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testCollectionHelperRejectsEmptyCallsOutsideAndInsideTheWrongFrame(bool $reusePreparedMappings): void
+    {
+        [$mapper, $cache] = $this->collectionCallbackRuntime(reusePreparedMappings: $reusePreparedMappings);
+        $dispatch         = static function(string $parameter, string $elementSource, string $elementTarget, SourceMatchMode $sourceMatchMode) use ($cache): ?array {
+            if (! class_exists($elementSource) || ! class_exists($elementTarget)) {
+                throw new RuntimeException('Expected existing fixture classes.');
+            }
+
+            return $cache->mapCollection(
+                [], ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class,
+                $parameter, $elementSource, $elementTarget, $sourceMatchMode,
+            );
+        };
+        $assertRejected = static function() use ($dispatch): void {
+            try {
+                $dispatch('first', CallbackRelease::class, ReleaseDto::class, SourceMatchMode::Exact);
+                self::fail('Expected an inactive collection dispatch to fail, even with no elements.');
+            } catch (MappingExecutionFailed $exception) {
+                self::assertNull($exception->getPrevious());
+            }
+        };
+        $assertRejected();
+
+        $observedReleaseCollectionsSource = new ObservedReleaseCollectionsSource([], [], new CollectionExecutionTrace(), static function() use ($dispatch, $cache): void {
+            foreach ([
+                ['missing', CallbackRelease::class, ReleaseDto::class, SourceMatchMode::Exact],
+                ['first', Release::class, ReleaseDto::class, SourceMatchMode::Exact],
+                ['first', CallbackRelease::class, ApiAccessTokenDto::class, SourceMatchMode::Exact],
+                ['first', CallbackRelease::class, ReleaseDto::class, SourceMatchMode::CycleProxy],
+            ] as [$parameter, $elementSource, $elementTarget, $mode]) {
+                try {
+                    $dispatch($parameter, $elementSource, $elementTarget, $mode);
+                    self::fail('Expected invalid declared collection identity to fail.');
+                } catch (MappingExecutionFailed $exception) {
+                    self::assertNull($exception->getPrevious());
+                }
+            }
+
+            foreach ([
+                [ReleaseCollectionSource::class, ObservedReleaseCollectionsDto::class],
+                [ObservedReleaseCollectionsSource::class, ReleaseCollectionDto::class],
+            ] as [$sourceClass, $targetClass]) {
+                try {
+                    $cache->mapCollection([], $sourceClass, $targetClass, 'first', CallbackRelease::class, ReleaseDto::class, SourceMatchMode::Exact);
+                    self::fail('Expected a forged parent mapping identity to fail.');
+                } catch (MappingExecutionFailed $exception) {
+                    self::assertNull($exception->getPrevious());
+                }
+            }
+        });
+        $mapper->map($observedReleaseCollectionsSource, ObservedReleaseCollectionsDto::class);
+
+        $mapper->map(new ObservedReleaseCollectionsSource([
+            new CallbackRelease(static function() use ($assertRejected, $cache): string {
+                $assertRejected();
+
+                try {
+                    $cache->mapNested(new Release('sibling'), Release::class, ReleaseDto::class, SourceMatchMode::Exact);
+                    self::fail('An element must not dispatch its parent sibling.');
+                } catch (MappingExecutionFailed $exception) {
+                    self::assertStringContainsString('not an active declared dependency', $exception->getMessage());
+                }
+
+                return 'valid';
+            }),
+        ], [], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class);
+        $assertRejected();
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testCollectionChildCannotForgeAnotherParameterFailure(bool $reusePreparedMappings): void
+    {
+        [$mapper, $cache] = $this->collectionCallbackRuntime(reusePreparedMappings: $reusePreparedMappings);
+
+        try {
+            $mapper->map(new ObservedReleaseCollectionsSource([
+                new CallbackRelease(static function() use ($cache): string {
+                    $cache->collectionElementTypeFailure(
+                        ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class,
+                        'second', 'forged-sensitive-key', Release::class, new stdClass(),
+                    );
+                }),
+            ], [], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class);
+            self::fail('Expected forged parent error to be sanitized.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame('Could not execute mapping ' . ObservedReleaseCollectionsSource::class . '->' . ObservedReleaseCollectionsDto::class . '.', $exception->getMessage());
+            self::assertNull($exception->getPrevious());
+        }
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testCollectionCallbackFailureStopsIterationAndReleasesInputs(bool $reusePreparedMappings): void
+    {
+        [$mapper, $cache]                    = $this->collectionCallbackRuntime(reusePreparedMappings: $reusePreparedMappings);
+        $collectionExecutionTrace            = new CollectionExecutionTrace();
+        $callbackRelease                     = new CallbackRelease(static function() use ($collectionExecutionTrace): string {
+            $collectionExecutionTrace->events[] = 'attempt';
+
+            throw new RuntimeException('sensitive callback details');
+        });
+        $weakReference                       = WeakReference::create($callbackRelease);
+        $observedReleaseCollectionsSource    = new ObservedReleaseCollectionsSource([
+            $callbackRelease,
+            new CallbackRelease(static function() use ($collectionExecutionTrace): string {
+                $collectionExecutionTrace->events[] = 'unexpected';
+
+                return 'late';
+            }),
+        ], [], $collectionExecutionTrace);
+        $weakSource = WeakReference::create($observedReleaseCollectionsSource);
+
+        try {
+            $mapper->map($observedReleaseCollectionsSource, ObservedReleaseCollectionsDto::class);
+            self::fail('Expected the callback to throw.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertStringNotContainsString('sensitive callback details', $exception->getMessage());
+            self::assertNull($exception->getPrevious());
+        }
+        self::assertSame(['first', 'second', 'attempt'], $collectionExecutionTrace->events);
+        if (function_exists('xdebug_info') && in_array('develop', xdebug_info('mode'), true)) {
+            self::markTestSkipped('Xdebug retains exception arguments; run XDEBUG_MODE=off to verify runtime retention.');
+        }
+        unset($callbackRelease, $observedReleaseCollectionsSource, $exception);
+        self::assertNull($weakReference->get());
+        self::assertNull($weakSource->get());
+        $observedReleaseCollectionsDto = $mapper->map(new ObservedReleaseCollectionsSource([
+            new CallbackRelease(static fn (): string => 'recovered'),
+        ], [], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class);
+        self::assertEquals([new ReleaseDto('recovered')], $observedReleaseCollectionsDto->first);
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testCollectionFibersAndReentrantRootsKeepIndependentFrames(bool $reusePreparedMappings): void
+    {
+        [$mapper, $cache] = $this->collectionCallbackRuntime(reusePreparedMappings: $reusePreparedMappings);
+        $fiber            = new Fiber(static fn (): ObservedReleaseCollectionsDto => $mapper->map(new ObservedReleaseCollectionsSource([
+            new CallbackRelease(static function() use ($mapper): string {
+                Fiber::suspend('element');
+                $observedReleaseCollectionsDto = $mapper->map(new ObservedReleaseCollectionsSource([
+                    new CallbackRelease(static fn (): string => 'inner'),
+                ], [], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class);
+
+                self::assertEquals([new ReleaseDto('inner')], $observedReleaseCollectionsDto->first);
+
+                return 'outer:inner';
+            }),
+        ], [], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class));
+        self::assertSame('element', $fiber->start());
+
+        try {
+            $cache->mapCollection([], ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, 'first', CallbackRelease::class, ReleaseDto::class, SourceMatchMode::Exact);
+            self::fail('The main execution must not borrow a suspended Fiber frame.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertNull($exception->getPrevious());
+        }
+        $observedReleaseCollectionsDto = $mapper->map(new ObservedReleaseCollectionsSource([
+            new CallbackRelease(static fn (): string => 'main'),
+        ], [], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class);
+        self::assertEquals([new ReleaseDto('main')], $observedReleaseCollectionsDto->first);
+        $fiber->resume();
+        self::assertSame('outer:inner', $fiber->getReturn()->first[0]->version);
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testCustomCollectionCallbacksCannotBorrowParentAuthority(bool $reusePreparedMappings): void
+    {
+        foreach (['custom', 'provider-get', 'provider-map'] as $callbackKind) {
+            $customMapper     = new CallbackReleaseMapper();
+            $provider         = 'custom' === $callbackKind ? null : new CallbackReleaseProvider($customMapper);
+            [$mapper, $cache] = $this->collectionCallbackRuntime($customMapper, $provider, $reusePreparedMappings);
+            $events           = new CollectionExecutionTrace();
+            $callback         = static function() use ($cache, $events): void {
+                $events->events[] = 'callback';
+                foreach (['collection', 'nested', 'failure'] as $attempt) {
+                    try {
+                        match ($attempt) {
+                            'collection' => $cache->mapCollection([new Release('sibling')], ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, 'second', Release::class, ReleaseDto::class, SourceMatchMode::Exact),
+                            'nested'     => $cache->mapNested(new Release('sibling'), Release::class, ReleaseDto::class, SourceMatchMode::Exact),
+                            'failure'    => $cache->collectionElementTypeFailure(ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, 'second', 'forged-sensitive-key', Release::class, null),
+                        };
+                        self::fail('A custom callback borrowed parent authority: ' . $attempt);
+                    } catch (MappingExecutionFailed $exception) {
+                        self::assertNull($exception->getPrevious());
+                        $events->events[] = $attempt;
+                    }
+                }
+            };
+            if ('provider-get' === $callbackKind && $provider instanceof CallbackReleaseProvider) {
+                $provider->callback = $callback;
+            } else {
+                $customMapper->callback = $callback;
+            }
+            $source = new ObservedReleaseCollectionsSource([
+                new CallbackRelease(static fn (): string => 'one'),
+                new CallbackRelease(static fn (): string => 'two'),
+            ], [new Release('sibling')], new CollectionExecutionTrace());
+            $result = $mapper->map($source, ObservedReleaseCollectionsDto::class);
+            self::assertEquals([new ReleaseDto('one'), new ReleaseDto('two')], $result->first);
+            self::assertEquals([new ReleaseDto('sibling')], $result->second);
+            self::assertSame(['callback', 'collection', 'nested', 'failure', 'callback', 'collection', 'nested', 'failure'], $events->events);
+            self::assertSame(2, $customMapper->invocations);
+            self::assertSame($provider instanceof CallbackReleaseProvider ? 2 : null, $provider?->lookups);
+
+            $throwingCallback = static function(): never {
+                throw new RuntimeException('sensitive fallback failure');
+            };
+            if ('provider-get' === $callbackKind) {
+                $provider->callback = $throwingCallback;
+            } else {
+                $customMapper->callback = $throwingCallback;
+            }
+
+            try {
+                $mapper->map($source, ObservedReleaseCollectionsDto::class);
+                self::fail('Expected fallback callback failure.');
+            } catch (MappingExecutionFailed $exception) {
+                self::assertStringNotContainsString('sensitive fallback failure', $exception->getMessage());
+                self::assertNull($exception->getPrevious());
+            }
+            self::assertSame('provider-get' === $callbackKind ? 2 : 3, $customMapper->invocations);
+            self::assertSame($provider instanceof CallbackReleaseProvider ? 3 : null, $provider?->lookups);
+            $customMapper->callback = null;
+            if ($provider instanceof CallbackReleaseProvider) {
+                $provider->callback = null;
+            }
+            $recovered = $mapper->map($source, ObservedReleaseCollectionsDto::class);
+            self::assertEquals([new ReleaseDto('one'), new ReleaseDto('two')], $recovered->first);
+            self::assertEquals([new ReleaseDto('sibling')], $recovered->second);
+        }
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testReentrantCustomRootsCannotBorrowParentCollectionAuthority(bool $reusePreparedMappings): void
+    {
+        foreach (['custom', 'provider-get', 'provider-map'] as $kind) {
+            $customMapper         = new CallbackReleaseMapper();
+            $cacheProvider        = 'custom' === $kind ? null : new CallbackReleaseProvider(new CallbackReleaseMapper());
+            [, $cache, $registry] = $this->collectionCallbackRuntime($customMapper, $cacheProvider, $reusePreparedMappings);
+            $rootProvider         = 'custom' === $kind ? null : new CallbackReleaseProvider($customMapper);
+            $mapper               = new ObjectMapper($registry, $cache, $rootProvider);
+            $callback             = static function() use ($cache): void {
+                foreach (['collection', 'nested', 'failure'] as $attempt) {
+                    try {
+                        match ($attempt) {
+                            'collection' => $cache->mapCollection([], ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, 'second', Release::class, ReleaseDto::class, SourceMatchMode::Exact),
+                            'nested'     => $cache->mapNested(new Release('sibling'), Release::class, ReleaseDto::class, SourceMatchMode::Exact),
+                            'failure'    => $cache->collectionElementTypeFailure(ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, 'second', 'forged-key', Release::class, null),
+                        };
+                        self::fail('An independent custom root borrowed parent authority: ' . $attempt);
+                    } catch (MappingExecutionFailed $exception) {
+                        self::assertNull($exception->getPrevious());
+                    }
+                }
+            };
+            if ('provider-get' === $kind && $rootProvider instanceof CallbackReleaseProvider) {
+                $rootProvider->callback = $callback;
+            } else {
+                $customMapper->callback = $callback;
+            }
+            $result = $mapper->map(new ObservedReleaseCollectionsSource([], [new Release('restored')], new CollectionExecutionTrace(), static function() use ($mapper): void {
+                self::assertEquals(new ReleaseDto('root'), $mapper->map(new CallbackRelease(static fn (): string => 'root'), ReleaseDto::class));
+            }), ObservedReleaseCollectionsDto::class);
+            self::assertEquals([new ReleaseDto('restored')], $result->second);
+            self::assertSame(1, $customMapper->invocations);
+            if ($rootProvider instanceof CallbackReleaseProvider && $cacheProvider instanceof CallbackReleaseProvider) {
+                self::assertSame(1, $rootProvider->lookups);
+                self::assertSame(0, $cacheProvider->lookups);
+            }
+        }
+    }
+
+    /** @return array<string, array{bool}> */
+    public static function collectionCacheModes(): array
+    {
+        return [
+            'default'  => [false],
+            'prepared' => [true],
+        ];
     }
 
     public function testWarmupHandlesMultiLevelAndCustomChildrenWithoutExecutingCustomCode(): void
@@ -2517,6 +2928,30 @@ final class ObjectMapperTest extends TestCase
                 $mappingRegistry,
             ),
         );
+    }
+
+    /** @return array{ObjectMapper, MapperCache, MappingRegistry} */
+    private function collectionCallbackRuntime(?CallbackReleaseMapper $callbackReleaseMapper = null, ?CallbackReleaseProvider $callbackReleaseProvider = null, bool $reusePreparedMappings = false): array
+    {
+        $mappingRegistry = new MappingRegistry([
+            $callbackReleaseProvider instanceof CallbackReleaseProvider
+                ? new ProviderCustomMappingDefinition(CallbackRelease::class, ReleaseDto::class, 'child')
+                : ($callbackReleaseMapper instanceof CallbackReleaseMapper
+                    ? new CustomMappingDefinition(CallbackRelease::class, ReleaseDto::class, $callbackReleaseMapper)
+                    : new MappingDefinition(CallbackRelease::class, ReleaseDto::class)),
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new MappingDefinition(ObservedReleaseCollectionsSource::class, ObservedReleaseCollectionsDto::class, [
+                'first'  => MapRule::fromGetter('getFirst')->collection(CallbackRelease::class, ReleaseDto::class),
+                'second' => MapRule::fromGetter('getSecond')->collection(Release::class, ReleaseDto::class),
+            ]),
+        ]);
+        $mapperCache = new MapperCache(
+            new MappingMetadataFactory(mappingRegistry: $mappingRegistry),
+            new PhpMapperGenerator(), $this->cacheDirectory, new ValueTransformerRegistry(),
+            generateOnDemand: true, mappingRegistry: $mappingRegistry, customObjectMapperProvider: $callbackReleaseProvider, reusePreparedMappings: $reusePreparedMappings,
+        );
+
+        return [new ObjectMapper($mappingRegistry, $mapperCache), $mapperCache, $mappingRegistry];
     }
 
     private function mapperWithPreparedCache(

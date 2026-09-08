@@ -63,7 +63,7 @@ final readonly class ObjectMapper implements WarmableObjectMapperInterface
         if ($mappingDefinition instanceof MappingDefinition) {
             $mapped = $this->mapperCache->map($mappingDefinition, $source);
         } elseif ($mappingDefinition instanceof CustomMappingDefinition || $mappingDefinition instanceof ProviderCustomMappingDefinition) {
-            $mapped = $this->customMappingExecutor->map($mappingDefinition, $source);
+            $mapped = $this->mapperCache->mapCustom($mappingDefinition, $source, $this->customMappingExecutor);
         } else {
             throw new MappingExecutionFailed(sprintf(
                 'Mapping %s has an unsupported definition type %s.',

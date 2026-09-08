@@ -21,7 +21,7 @@ use function str_replace;
 /** @internal */
 final class PhpMapperGenerator
 {
-    private const FORMAT_VERSION = '6';
+    private const FORMAT_VERSION = '7';
 
     public function cacheKey(MappingMetadata $mappingMetadata): string
     {
@@ -152,6 +152,15 @@ final class PhpMapperGenerator
         return "\n    /** @return list<object> */\n"
             . "    private function {$method}(array \$values): array\n"
             . "    {\n"
+            . "        if ([] === \$values) {\n"
+            . "            return [];\n"
+            . "        }\n\n"
+            . "        if (\$this->nestedMappings instanceof \\Sirix\\ObjectMapper\\Runtime\\CollectionMappingRuntimeInterface) {\n"
+            . "            \$mapped = \$this->nestedMappings->mapCollection(\$values, {$sourceClass}::class, {$targetClass}::class, '{$parameter}', {$elementSource}::class, {$elementTarget}::class, {$sourceMatch});\n"
+            . "            if (null !== \$mapped) {\n"
+            . "                return \$mapped;\n"
+            . "            }\n"
+            . "        }\n\n"
             . "        \$mapped = [];\n"
             . "        foreach (\$values as \$key => \$element) {\n"
             . "            if (!is_object(\$element) || !\\Sirix\\ObjectMapper\\Runtime\\SourceMatcher::matches(\$element, {$elementSource}::class, {$sourceMatch})) {\n"
