@@ -409,6 +409,30 @@ this option.
 Mapping failures retain structured pair/parameter diagnostics. Do not add the
 mapped source object or its values to application logs.
 
+### Mapping execution contexts
+
+The runtime keeps mapping state local to the current execution model: the main
+PHP context has its own slot, and every native PHP `Fiber` has independent
+state. Multiple Fibers may suspend and resume interleaved mappings without
+sharing declared nested dependencies, collection diagnostics, or failure
+provenance. A native Fiber may resume after a nested getter, transformer, or
+custom mapper yields, and may map again after either success or a caught
+failure.
+
+Every public `MapperCache::map()` call is an independent execution boundary,
+including recursive calls from application callbacks. Nested dispatch can use
+only dependencies declared by its active mapping frame. Frames restore the
+previous execution in `finally`, including when preparation, a callback, or
+generated mapping code throws. A completed mapping does not retain its source,
+mapped objects, caught exception, or request-scoped collaborator; Fiber-owned
+runtime state does not make an earlier failure valid in a later mapping on the
+same Fiber.
+
+This remains an internal runtime implementation detail. `ObjectMapper::map()`,
+`NestedMappingRuntimeInterface`, generated format `7`, and prepared-cache
+ownership/lifecycle are unchanged. Native Fiber coverage does not extend the
+non-yielding Swoole/OpenSwoole restriction described above.
+
 Conventional mappings without nested or collection rules now use lightweight
 execution at the root and when reached as leaves. Eligibility is recorded during
 preparation; warm prepared calls do not rescan metadata for this classification.
@@ -443,6 +467,88 @@ environment (OPcache CLI and JIT disabled) after warmup produced:
 The hot-path runs retained no additional PHP allocator memory between rounds.
 Run the benchmark on target hardware and compare ratios rather than treating
 these absolute values as a production capacity guarantee.
+
+### Benchmarking execution contexts
+
+The benchmark also has execution-context workloads for flat, deep nested,
+diamond, collection, native-Fiber, and expected-failure paths. Each reports
+out-of-loop correctness checks plus repeated-call PHP and allocator-retention
+deltas; the Fiber workload constructs and warms the mapper before timing
+suspend/resume operations. `--runtime-root` selects the library source to
+measure while keeping this physical harness fixed; it is fail-closed: a missing
+or mismatched selected runtime class aborts the benchmark instead of falling
+back to the harness checkout. The JSON `runtime_isolation` record verifies the
+loaded class provenance; all final JSON reported `verified` with 15 class-file
+records. Use the selected root for both revisions.
+`--execution-context-mode=prepared`, `default`, and `both` select the prepared
+cache, ordinary cache, or both modes respectively (`both` is the default).
+
+For the canonical prepared-cache comparison, run the harness from one fixed
+checkout and substitute each revision's absolute source root. Keep
+`XDEBUG_MODE=off`, CPU affinity, PHP settings, iterations, and rounds identical:
+
+```sh
+XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/baseline --workload=contexts --execution-context-mode=prepared --simple-iterations=200000 --collection-iterations=5000 --context-iterations=30000 --fiber-iterations=30000 --rounds=7
+XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/candidate --workload=contexts --execution-context-mode=prepared --simple-iterations=200000 --collection-iterations=5000 --context-iterations=30000 --fiber-iterations=30000 --rounds=7
+```
+
+Use `--workload=flat`, `collection`, `deep`, `diamond`, `fiber`, or `failure`
+to repeat one shape. `--workload=collections` remains the legacy collection
+matrix selector; it is not the execution-context collection shape. Compare
+alternating revision runs rather than a single absolute timing, and keep setup,
+warmup, source construction, and correctness checks outside the measured loop.
+JSON records effective PHP settings, wall and current-process CPU time, and
+memory measurements; child-process CPU time is not included.
+
+Current behavioral verification covers suspended/resumed native-Fiber nested
+getter, transformer, and custom-mapper calls; independent main-context work
+while a Fiber is suspended; public-cache reentry after execution and partial
+preparation failures; failure provenance; and weak-reference cleanup. The
+focused scenarios passed 24 tests / 558 assertions, and the integration suite
+passed 181 tests / 2,543 assertions. The final complete suite passed 267 tests /
+2,876 assertions.
+
+The verified comparison uses one physical harness (SHA-256
+`0d5e7d12563c9a5e35514291cb3257cc71423bccfdb6a59fda2da002d6747497`) and
+baseline `d0ca7c4` (runtime hash `2a802440...f5c92e`) against the candidate
+(runtime hash `2c74db...f4c0e`). It ran on PHP 8.5.8 CLI, pinned to CPU 2, with
+OPcache on, JIT disabled, PCOV false, and `XDEBUG_MODE=off`. Seven prepared
+rounds had medians of roughly 73–281 ms. The paired ratios below are
+baseline-ms/candidate-ms, so values above 1 favour the candidate:
+
+| Workload | A/B | C/D |
+| --- | ---: | ---: |
+| Flat | 1.086 | 1.045 |
+| Collection | 1.149 | 1.101 |
+| Deep | 1.122 | 1.043 |
+| Diamond | 1.114 | 0.890 |
+| Native Fiber | 1.115 | 1.061 |
+| Leaf expected failure | 0.974 | 0.963 |
+| Structural expected failure | 0.950 | 0.962 |
+
+All repeated-call retention and allocator deltas were zero. OPcache-on
+single-workload controls confirmed collection (1.121/1.173), deep
+(1.053/1.225), and diamond (1.114/1.063). The fail-closed OPcache-off balanced
+A/B/B/A repeat confirmed deep (1.097/1.062) and diamond (1.108/1.105).
+
+Fiber is inconclusive because it was sensitive to order and run frequency: the
+focused A/B/A/B result was 0.841/0.878, while reverse B/A/A/B measured
+baseline/candidate as 1.093/1.088. It therefore supports neither a Fiber gain
+nor a Fiber regression. The small expected-failure losses overlap run-to-run
+variation in an exception-dominated path and are not claimed as an improvement.
+
+The low-duration default controls (seven rounds; simple 2,000 and
+collection/context/Fiber 500 iterations) varied strongly and their ratios
+changed sign. That path includes unchanged preparation, cache, and source
+validation, so it cannot attribute a regression to execution contexts. The
+earlier blocked result used only 100 context/Fiber and 10 collection iterations,
+producing 0.1–2.3 ms prepared rounds while the documented protocol required
+10,000 context iterations; it published only those noisy default medians.
+
+The performance gate passes on repeatable prepared deep, diamond, and
+collection gains plus zero retention; the remaining workloads showed no
+unexplained regression beyond measured variation. These microbenchmarks do not
+make an FPM throughput or capacity claim; repeat them on deployment hardware.
 
 ### Benchmarking lightweight leaf execution
 
@@ -518,9 +624,10 @@ hashes source files, so comparing a temporary copy with a workspace file can
 distort the ratio. Select each revision's library source through its autoloader
 while keeping the benchmark fixture path fixed. These historical collection
 measurements predate lightweight leaf execution; they are not incremental gains
-over it. Execution-context and prepared-template stages remain deferred. See the
-[separate leaf comparison](#benchmarking-lightweight-leaf-execution) for the
-subsequent change against `81845e5`.
+over it. They also predate the execution-context runtime work, so they are not
+an incremental comparison for that change. See the [separate leaf
+comparison](#benchmarking-lightweight-leaf-execution) for the subsequent change
+against `81845e5`.
 
 On PHP 8.5.8 CLI, Linux x64, with OPcache on, JIT/PCOV off and no active
 Xdebug, two alternating baseline/candidate runs of five rounds each produced

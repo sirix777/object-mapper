@@ -20,6 +20,9 @@ use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Runtime\CollectionMappingRuntimeInterface;
 use Sirix\ObjectMapper\Runtime\CustomMappingExecutor;
 use Sirix\ObjectMapper\Runtime\GeneratedMappingExecutionFailed;
+use Sirix\ObjectMapper\Runtime\MappingExecution;
+use Sirix\ObjectMapper\Runtime\MappingExecutionContext;
+use Sirix\ObjectMapper\Runtime\MappingExecutionFrame;
 use Sirix\ObjectMapper\Runtime\NestedMappingRuntimeInterface;
 use Sirix\ObjectMapper\Runtime\SourceMatcher;
 use stdClass;
@@ -27,8 +30,6 @@ use Throwable;
 
 use WeakMap;
 
-use function array_key_last;
-use function array_pop;
 use function chmod;
 use function class_exists;
 use function escapeshellarg;
@@ -71,24 +72,19 @@ use function unlink;
  * @phpstan-type Dependency array{definition: CustomMappingDefinition|MappingDefinition|ProviderCustomMappingDefinition, mapper: GeneratedMapperInterface|null, hasStructuralMappings: bool}
  * @phpstan-type CollectionFailureDetails array{source: string, target: string, parameter: string, expected: string, elementTarget: class-string, sourceMatch: SourceMatchMode}
  * @phpstan-type PreparedMapping array{metadata: MappingMetadata, cacheKey: string, mapper: GeneratedMapperInterface, hasStructuralMappings: bool}
- * @phpstan-type Scope array{definition: MappingDefinition, source: string, target: string, execution: object, dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}
  */
 final class MapperCache implements NestedMappingRuntimeInterface, CollectionMappingRuntimeInterface
 {
     /** @var array<string, GeneratedMapperInterface> */
     private array $mappers = [];
 
-    /** @var WeakMap<object, array{source: string, target: string, parameter: string, expected: string, key: string, actualType: string, execution: object}> */
+    /** @var WeakMap<object, array{source: string, target: string, parameter: string, expected: string, key: string, actualType: string, provenance: object}> */
     private readonly WeakMap $weakMap;
 
-    /** @var list<Scope> */
-    private array $mainMappingScopes = [];
+    private readonly MappingExecutionContext $mappingExecutionContext;
 
-    /** @var WeakMap<object, list<Scope>> */
-    private readonly WeakMap $fiberScopes;
-
-    /** @var WeakMap<object, array<string, array{dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}>> */
-    private readonly WeakMap $executionMappings;
+    /** @var WeakMap<object, MappingExecutionContext> Native Fiber ownership. */
+    private readonly WeakMap $fiberExecutionContexts;
 
     /** @var WeakMap<MappingDefinition, PreparedMapping> */
     private readonly WeakMap $preparedMappings;
@@ -110,11 +106,11 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             throw new InvalidArgumentException('The mapper cache directory cannot be empty.');
         }
 
-        $this->weakMap               = new WeakMap();
-        $this->fiberScopes           = new WeakMap();
-        $this->executionMappings     = new WeakMap();
-        $this->preparedMappings      = new WeakMap();
-        $this->customMappingExecutor = $customMappingExecutor ?? new CustomMappingExecutor($customObjectMapperProvider);
+        $this->weakMap                   = new WeakMap();
+        $this->mappingExecutionContext   = new MappingExecutionContext();
+        $this->fiberExecutionContexts    = new WeakMap();
+        $this->preparedMappings          = new WeakMap();
+        $this->customMappingExecutor     = $customMappingExecutor ?? new CustomMappingExecutor($customObjectMapperProvider);
     }
 
     public function get(MappingDefinition $mappingDefinition): GeneratedMapperInterface
@@ -124,25 +120,20 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
 
     public function map(MappingDefinition $mappingDefinition, object $source): object
     {
-        $scopes = $this->scopes();
-        $this->saveScopes([]);
+        $mappingExecutionContext = $this->currentContext();
+        $previous                = $mappingExecutionContext->currentFrame;
+
+        if (! $previous instanceof MappingExecutionFrame) {
+            return $this->executeRoot($mappingExecutionContext, $mappingDefinition, $source);
+        }
+
+        // A reentrant public root is an authority barrier even while preparation runs.
+        $mappingExecutionContext->currentFrame = null;
 
         try {
-            $preparedMapping = $this->prepare($mappingDefinition, $this->generateOnDemand);
-
-            if (! $preparedMapping['hasStructuralMappings']) {
-                return $this->executeLeaf($mappingDefinition, $source, $preparedMapping['mapper']);
-            }
-
-            return $this->executeConventional(
-                $mappingDefinition,
-                $source,
-                $preparedMapping['mapper'],
-                $preparedMapping['hasStructuralMappings'],
-                $preparedMapping['metadata'],
-            );
+            return $this->executeRoot($mappingExecutionContext, $mappingDefinition, $source);
         } finally {
-            $this->saveScopes($scopes);
+            $mappingExecutionContext->currentFrame = $previous;
         }
     }
 
@@ -217,7 +208,8 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             ));
         }
 
-        $dependency = $this->activeDependency($source, $target);
+        $mappingExecutionContext    = $this->currentContext();
+        $dependency                 = $this->activeDependency($mappingExecutionContext, $source, $target);
         if (null === $dependency) {
             throw new MappingExecutionFailed('Nested mapping dispatch is not an active declared dependency.');
         }
@@ -233,11 +225,11 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
                 ));
             }
 
-            $mapped = $this->executeConventional($mappingDefinition, $value, $generatedMapper, $dependency['hasStructuralMappings']);
+            $mapped = $this->executeConventional($mappingExecutionContext, $mappingDefinition, $value, $generatedMapper, $dependency['hasStructuralMappings']);
         } elseif ($mappingDefinition instanceof CustomMappingDefinition) {
-            $mapped = $this->mapCustom($mappingDefinition, $value, $this->customMappingExecutor);
+            $mapped = $this->executeCustom($mappingExecutionContext, $mappingDefinition, $value, $this->customMappingExecutor);
         } elseif ($mappingDefinition instanceof ProviderCustomMappingDefinition) {
-            $mapped = $this->mapCustom($mappingDefinition, $value, $this->customMappingExecutor);
+            $mapped = $this->executeCustom($mappingExecutionContext, $mappingDefinition, $value, $this->customMappingExecutor);
         } else {
             throw new MappingCompilationFailed(sprintf(
                 'Nested mapping %s has an unsupported definition type %s.',
@@ -274,17 +266,17 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         string $elementTarget,
         SourceMatchMode $sourceMatchMode,
     ): ?array {
-        $parentScopes = $this->scopes();
-        $scope        = [] === $parentScopes ? null : $parentScopes[array_key_last($parentScopes)];
-        $collection   = $scope['collections'][$this->collectionKeyId($parameter, $elementSource)] ?? null;
-        if (null === $scope || null === $collection
-            || $scope['source'] !== $source || $scope['target'] !== $target
+        $mappingExecutionContext     = $this->currentContext();
+        $parentFrame                 = $mappingExecutionContext->currentFrame;
+        $collection                  = $parentFrame?->collections[$this->collectionKeyId($parameter, $elementSource)] ?? null;
+        if (! $parentFrame instanceof MappingExecutionFrame || null === $collection
+            || $parentFrame->definition->source !== $source || $parentFrame->definition->target !== $target
             || $collection['elementTarget'] !== $elementTarget
             || $collection['sourceMatch'] !== $sourceMatchMode) {
             throw new MappingExecutionFailed('Collection mapping dispatch is not an active declared dependency.');
         }
 
-        $dependency = $scope['dependencies'][$this->dependencyKey($elementSource, $elementTarget)] ?? null;
+        $dependency = $parentFrame->dependencies[$this->dependencyKey($elementSource, $elementTarget)] ?? null;
         if (null === $dependency) {
             throw new MappingExecutionFailed('Collection mapping dispatch is not an active declared dependency.');
         }
@@ -310,14 +302,14 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             }
 
             // Leaf callbacks must not inherit the parent collection's authority.
-            $this->saveScopes([]);
+            $mappingExecutionContext->currentFrame = null;
 
             try {
                 $result = $mapper->map($element);
             } catch (Throwable) {
                 throw $this->executionFailure($definition);
             } finally {
-                $this->saveScopes($parentScopes);
+                $mappingExecutionContext->currentFrame = $parentFrame;
             }
 
             if (! $result instanceof $elementTarget) {
@@ -338,11 +330,12 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         string $expected,
         mixed $actual,
     ): never {
-        $scope   = $this->activeScope();
-        $details = null === $scope ? null : ($scope['collections'][$this->collectionKeyId($parameter, $expected)] ?? null);
+        $context = $this->currentContext();
+        $frame   = $context->currentFrame;
+        $details = $frame?->collections[$this->collectionKeyId($parameter, $expected)] ?? null;
         if (null === $details
-            || $scope['source'] !== $source
-            || $scope['target'] !== $target) {
+            || $frame->definition->source !== $source
+            || $frame->definition->target !== $target) {
             throw new MappingExecutionFailed('Generated collection element validation failed.');
         }
 
@@ -351,7 +344,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             ...$details,
             'key'        => $this->collectionKey($key),
             'actualType' => $this->safeType($actual),
-            'execution'  => $scope['execution'],
+            'provenance' => $frame->execution->provenance,
         ];
 
         throw new GeneratedMappingExecutionFailed($context);
@@ -360,11 +353,28 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
     /** @internal */
     public function collectionFailure(GeneratedMappingExecutionFailed $generatedMappingExecutionFailed, MappingDefinition $mappingDefinition): ?string
     {
-        $context = $generatedMappingExecutionFailed->context();
-        $details = $this->weakMap[$context] ?? null;
-        unset($this->weakMap[$context]);
+        return $this->resolveCollectionFailure($this->currentContext(), $generatedMappingExecutionFailed, $mappingDefinition);
+    }
 
-        if (null === $details || ! $this->isActiveCollectionFailure($mappingDefinition, $details)) {
+    /** @internal Runs custom roots and children without inheriting generated authority. */
+    public function mapCustom(
+        CustomMappingDefinition|ProviderCustomMappingDefinition $mappingDefinition,
+        object $value,
+        CustomMappingExecutor $customMappingExecutor,
+    ): object {
+        return $this->executeCustom($this->currentContext(), $mappingDefinition, $value, $customMappingExecutor);
+    }
+
+    private function resolveCollectionFailure(
+        MappingExecutionContext $mappingExecutionContext,
+        GeneratedMappingExecutionFailed $generatedMappingExecutionFailed,
+        MappingDefinition $mappingDefinition,
+    ): ?string {
+        $failureContext = $generatedMappingExecutionFailed->context();
+        $details        = $this->weakMap[$failureContext] ?? null;
+        unset($this->weakMap[$failureContext]);
+
+        if (null === $details || ! $this->isActiveCollectionFailure($mappingExecutionContext, $mappingDefinition, $details)) {
             return null;
         }
 
@@ -379,8 +389,8 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         );
     }
 
-    /** @internal Runs custom roots and children without inheriting generated authority. */
-    public function mapCustom(
+    private function executeCustom(
+        MappingExecutionContext $mappingExecutionContext,
         CustomMappingDefinition|ProviderCustomMappingDefinition $mappingDefinition,
         object $value,
         CustomMappingExecutor $customMappingExecutor,
@@ -389,29 +399,29 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             throw new MappingExecutionFailed(sprintf('Could not execute mapping %s.', $mappingDefinition->key()));
         }
 
-        $scopes = $this->scopes();
+        $previous = $mappingExecutionContext->currentFrame;
         // Custom mappings declare no generated dependencies. Hide the parent's
         // authority from both provider resolution and the mapper's callbacks.
-        $this->saveScopes([]);
+        $mappingExecutionContext->currentFrame = null;
 
         try {
             return $customMappingExecutor->map($mappingDefinition, $value);
         } finally {
-            $this->saveScopes($scopes);
+            $mappingExecutionContext->currentFrame = $previous;
         }
     }
 
     /**
-     * @param array{source: string, target: string, parameter: string, expected: string, key: string, actualType: string, execution: object} $details
+     * @param array{source: string, target: string, parameter: string, expected: string, key: string, actualType: string, provenance: object} $details
      */
-    private function isActiveCollectionFailure(MappingDefinition $mappingDefinition, array $details): bool
+    private function isActiveCollectionFailure(MappingExecutionContext $mappingExecutionContext, MappingDefinition $mappingDefinition, array $details): bool
     {
-        $scope = $this->activeScope();
+        $frame = $mappingExecutionContext->currentFrame;
 
-        return null !== $scope
-            && $scope['source'] === $mappingDefinition->source
-            && $scope['target'] === $mappingDefinition->target
-            && $scope['execution'] === $details['execution'];
+        return $frame instanceof MappingExecutionFrame
+            && $frame->definition->source === $mappingDefinition->source
+            && $frame->definition->target === $mappingDefinition->target
+            && $frame->execution->provenance === $details['provenance'];
     }
 
     /** Runs a leaf after its caller has isolated the active scopes. */
@@ -428,26 +438,51 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         }
     }
 
+    private function executeRoot(
+        MappingExecutionContext $mappingExecutionContext,
+        MappingDefinition $mappingDefinition,
+        object $source,
+    ): object {
+        $preparedMapping = $this->prepare($mappingDefinition, $this->generateOnDemand);
+
+        if (! $preparedMapping['hasStructuralMappings']) {
+            return $this->executeLeaf($mappingDefinition, $source, $preparedMapping['mapper']);
+        }
+
+        return $this->executeConventional(
+            $mappingExecutionContext,
+            $mappingDefinition,
+            $source,
+            $preparedMapping['mapper'],
+            $preparedMapping['hasStructuralMappings'],
+            $preparedMapping['metadata'],
+            new MappingExecution(),
+        );
+    }
+
     private function executeConventional(
+        MappingExecutionContext $mappingExecutionContext,
         MappingDefinition $mappingDefinition,
         object $source,
         GeneratedMapperInterface $generatedMapper,
         bool $hasStructuralMappings,
         ?MappingMetadata $mappingMetadata = null,
+        ?MappingExecution $mappingExecution = null,
     ): object {
         if (! $hasStructuralMappings) {
-            $scopes = $this->scopes();
-            $this->saveScopes([]);
+            $previous                              = $mappingExecutionContext->currentFrame;
+            $mappingExecutionContext->currentFrame = null;
 
             try {
                 return $this->executeLeaf($mappingDefinition, $source, $generatedMapper);
             } finally {
-                $this->saveScopes($scopes);
+                $mappingExecutionContext->currentFrame = $previous;
             }
         }
 
-        $isRoot = null === $this->activeScope();
-        $this->pushMapping($mappingDefinition, $mappingMetadata);
+        $previous                 = $mappingExecutionContext->currentFrame;
+        $isRoot                   = ! $previous instanceof MappingExecutionFrame;
+        $mappingExecutionFrame    = $this->enterMapping($mappingExecutionContext, $mappingDefinition, $mappingExecution ?? $previous->execution ?? new MappingExecution(), $mappingMetadata);
 
         try {
             return $generatedMapper->map($source);
@@ -456,7 +491,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
                 throw $exception;
             }
 
-            $collectionFailure = $this->collectionFailure($exception, $mappingDefinition);
+            $collectionFailure = $this->resolveCollectionFailure($mappingExecutionContext, $exception, $mappingDefinition);
             if (null !== $collectionFailure) {
                 throw $this->executionFailure($mappingDefinition, $collectionFailure);
             }
@@ -465,64 +500,48 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         } catch (Throwable) {
             throw new MappingExecutionFailed(sprintf('Could not execute mapping %s.', $mappingDefinition->key()));
         } finally {
-            $this->popMapping();
+            $this->exitMapping($mappingExecutionContext, $mappingExecutionFrame);
         }
     }
 
-    private function pushMapping(MappingDefinition $mappingDefinition, ?MappingMetadata $mappingMetadata = null): void
-    {
-        $scopes    = $this->scopes();
-        $scope     = [] === $scopes ? null : $scopes[array_key_last($scopes)];
-        $execution = $scope['execution'] ?? new stdClass();
-        $scopes[]  = [
-            'definition' => $mappingDefinition,
-            'source'     => $mappingDefinition->source,
-            'target'     => $mappingDefinition->target,
-            'execution'  => $execution,
-            ...$this->scopeMappings($mappingDefinition, $execution, $mappingMetadata),
-        ];
-        $this->saveScopes($scopes);
+    private function enterMapping(
+        MappingExecutionContext $mappingExecutionContext,
+        MappingDefinition $mappingDefinition,
+        MappingExecution $mappingExecution,
+        ?MappingMetadata $mappingMetadata = null,
+    ): MappingExecutionFrame {
+        $mappings                 = $this->scopeMappings($mappingDefinition, $mappingExecution, $mappingMetadata);
+        $mappingExecutionFrame    = new MappingExecutionFrame(
+            $mappingExecutionContext->currentFrame,
+            $mappingDefinition,
+            $mappingExecution,
+            $mappings['dependencies'],
+            $mappings['collections'],
+        );
+        $mappingExecutionContext->currentFrame = $mappingExecutionFrame;
+
+        return $mappingExecutionFrame;
     }
 
-    private function popMapping(): void
+    private function exitMapping(MappingExecutionContext $mappingExecutionContext, MappingExecutionFrame $mappingExecutionFrame): void
     {
-        $scopes = $this->scopes();
-        array_pop($scopes);
-        $this->saveScopes($scopes);
+        $mappingExecutionContext->currentFrame = $mappingExecutionFrame->previous;
     }
 
-    /** @return list<Scope> */
-    private function scopes(): array
+    private function currentContext(): MappingExecutionContext
     {
         $fiber = Fiber::getCurrent();
 
-        return $fiber instanceof Fiber ? $this->fiberScopes[$fiber] ?? [] : ($this->mainMappingScopes);
-    }
-
-    /** @param list<Scope> $scopes */
-    private function saveScopes(array $scopes): void
-    {
-        $fiber = Fiber::getCurrent();
         if (! $fiber instanceof Fiber) {
-            $this->mainMappingScopes = $scopes;
-
-            return;
+            return $this->mappingExecutionContext;
         }
 
-        $this->fiberScopes[$fiber] = $scopes;
+        return $this->fiberExecutionContexts[$fiber] ??= new MappingExecutionContext();
     }
 
     private function executionFailure(MappingDefinition $mappingDefinition, ?string $message = null): MappingExecutionFailed
     {
         return new MappingExecutionFailed($message ?? sprintf('Could not execute mapping %s.', $mappingDefinition->key()));
-    }
-
-    /** @return null|Scope */
-    private function activeScope(): ?array
-    {
-        $scopes = $this->scopes();
-
-        return [] === $scopes ? null : $scopes[array_key_last($scopes)];
     }
 
     /**
@@ -531,23 +550,23 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
      *
      * @return null|Dependency
      */
-    private function activeDependency(string $source, string $target): ?array
+    private function activeDependency(MappingExecutionContext $mappingExecutionContext, string $source, string $target): ?array
     {
-        $scope = $this->activeScope();
-        if (null === $scope) {
+        $frame = $mappingExecutionContext->currentFrame;
+        if (! $frame instanceof MappingExecutionFrame) {
             return null;
         }
 
-        return $scope['dependencies'][$this->dependencyKey($source, $target)] ?? null;
+        return $frame->dependencies[$this->dependencyKey($source, $target)] ?? null;
     }
 
     /** @return array{dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>} */
     private function scopeMappings(
         MappingDefinition $mappingDefinition,
-        object $execution,
+        MappingExecution $mappingExecution,
         ?MappingMetadata $mappingMetadata = null,
     ): array {
-        $mappings = $this->executionMappings[$execution] ?? [];
+        $mappings = $mappingExecution->mappings;
         $key      = $mappingDefinition->key();
         if (isset($mappings[$key])) {
             return $mappings[$key];
@@ -597,7 +616,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
                 $mapper                = $preparedMapping['mapper'];
                 $hasStructuralMappings = $preparedMapping['hasStructuralMappings'];
                 if ($hasStructuralMappings) {
-                    $this->scopeMappings($dependency, $execution, $preparedMapping['metadata']);
+                    $this->scopeMappings($dependency, $mappingExecution, $preparedMapping['metadata']);
                 }
             }
 
@@ -622,12 +641,12 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         // Recursive preparation may have populated descendants while this scope
         // was being assembled. Merge with that current snapshot rather than
         // overwriting it with the caller's stale local copy.
-        $mappings       = $this->executionMappings[$execution] ?? $mappings;
+        $mappings       = $mappingExecution->mappings ?: $mappings;
         $mappings[$key] = [
             'dependencies' => $dependencies,
             'collections'  => $collections,
         ];
-        $this->executionMappings[$execution] = $mappings;
+        $mappingExecution->mappings = $mappings;
 
         return $mappings[$key];
     }

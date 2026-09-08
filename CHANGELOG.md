@@ -8,6 +8,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Mapping runtime state now uses internal execution contexts and restorable
+  frames instead of Fiber scope arrays. Main-context mappings, multiple native
+  Fibers, recursive public cache entries, and suspended/resumed callbacks keep
+  independent declared-dependency boundaries and failure provenance. Cleanup
+  also covers partial preparation and callback failures; completed frames retain
+  no mapped objects, caught failures, or request-scoped collaborators. Public
+  APIs, generated format `7`, and prepared-cache lifecycle are unchanged.
 - Conventional root and nested leaves avoid structural execution tables, using
   eligibility recorded during preparation without rescanning warm prepared calls.
   This change preserves public APIs, generated format `7`, prepared-cache
@@ -37,12 +44,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unconfirmed. See [environment, protocol, and limits](README.md#benchmarking-lightweight-leaf-execution).
 - Regression verification passed on PHP 8.2.32, 8.3.32, 8.4.23, and 8.5.8
   (257 tests / 2712 assertions each), with final `composer check` passing.
+- Execution-context regressions passed: 24 focused tests / 558 assertions and
+  181 integration tests / 2,543 assertions cover interleaved native Fibers,
+  resumed nested getter/transformer/custom-mapper calls, public-cache reentry,
+  failure provenance, partial preparation failures, and weak-reference cleanup.
+  The final complete suite passed 267 tests / 2,876 assertions.
+  The benchmark harness now provides reproducible flat, deep, diamond,
+  collection, native-Fiber, and expected-failure context workloads with
+  correctness and repeated-call retention probes. An identical-harness A/B/A/B
+  comparison against baseline `d0ca7c4`, using one harness and seven stable
+  prepared rounds on PHP 8.5.8 CLI (CPU 2; OPcache on; JIT/PCOV off;
+  `XDEBUG_MODE=off`), together with additional focused and balanced controls,
+  found repeatable deep/diamond/collection gains; the full A/B/A/B diamond pair
+  was mixed. The fail-closed `--runtime-root` check recorded
+  `runtime_isolation=verified` with 15 class provenance records in every final
+  JSON. All success and failure repeated-retention and allocator deltas were
+  zero; OPcache-off controls found no repeatable unexplained regression beyond
+  same-version variation. Fiber was order/frequency-sensitive and is
+  inconclusive; exception-dominated failure results are not claimed as gains.
+  The performance gate passes. See [the
+  protocol, ratios, and limits](README.md#benchmarking-execution-contexts).
 - Collection benchmarks for sizes 0, 1, 100, and 1000 across leaf, structural,
   transformer, direct-custom, and provider-custom children, with default and
   prepared-cache execution, raw timings, items/s and retention probes. The
   comparison baseline is revision `38f002c` using the identical harness. These
-  measurements predate lightweight leaf execution; execution-context and
-  prepared-template stages remain deferred.
+  measurements predate lightweight leaf execution and the execution-context
+  runtime work; they are not incremental results for either later change.
 - On PHP 8.5.8 CLI with OPcache on and JIT/coverage off, prepared collections
   of 1000 conventional leaves improved 4.46–5.27× in paired run medians versus
   `38f002c`. Prepared custom/provider throughput was 18–39% lower alongside
