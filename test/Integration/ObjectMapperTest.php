@@ -1850,6 +1850,116 @@ final class ObjectMapperTest extends TestCase
     }
 
     #[DataProvider('collectionCacheModes')]
+    public function testProviderCollectionRestoresContextAfterSuspendedLookup(bool $reusePreparedMappings): void
+    {
+        foreach (['resume', 'throw'] as $continuation) {
+            $childMapper        = new CallbackReleaseMapper();
+            $provider           = new CallbackReleaseProvider($childMapper);
+            [$mapper, $cache]   = $this->collectionCallbackRuntime($childMapper, $provider, $reusePreparedMappings);
+            $provider->callback = static function() use ($cache): void {
+                Fiber::suspend('provider');
+                self::assertLeafCannotBorrowParentContext($cache);
+            };
+            $fiber = new Fiber(static fn (): ObservedReleaseCollectionsDto => $mapper->map(new ObservedReleaseCollectionsSource([
+                new CallbackRelease(static fn (): string => 'one'),
+                new CallbackRelease(static fn (): string => 'two'),
+            ], [new Release('sibling')], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class));
+
+            self::assertSame('provider', $fiber->start());
+            self::assertSame(1, $provider->lookups);
+            self::assertSame(0, $childMapper->invocations);
+            self::assertEquals(new ReleaseDto('main'), $mapper->map(new Release('main'), ReleaseDto::class));
+            if ('resume' === $continuation) {
+                self::assertSame('provider', $fiber->resume());
+                $fiber->resume();
+                self::assertEquals([new ReleaseDto('one'), new ReleaseDto('two')], $fiber->getReturn()->first);
+                self::assertEquals([new ReleaseDto('sibling')], $fiber->getReturn()->second);
+                self::assertSame(2, $provider->lookups);
+                self::assertSame(2, $childMapper->invocations);
+            } else {
+                try {
+                    $fiber->throw(new RuntimeException('sensitive provider failure'));
+                    self::fail('Expected the suspended provider to fail.');
+                } catch (MappingExecutionFailed $exception) {
+                    self::assertStringNotContainsString('sensitive', $exception->getMessage());
+                    self::assertNull($exception->getPrevious());
+                }
+                self::assertSame(1, $provider->lookups);
+                self::assertSame(0, $childMapper->invocations);
+            }
+            self::assertLeafCannotBorrowParentContext($cache);
+            $provider->callback = null;
+            $result             = $mapper->map(new ObservedReleaseCollectionsSource([
+                new CallbackRelease(static fn (): string => 'recovered'),
+            ], [new Release('restored')], new CollectionExecutionTrace()), ObservedReleaseCollectionsDto::class);
+            self::assertEquals([new ReleaseDto('recovered')], $result->first);
+            self::assertEquals([new ReleaseDto('restored')], $result->second);
+        }
+    }
+
+    #[DataProvider('collectionCacheModes')]
+    public function testCustomCollectionStopsAtWrongTargetAndRecovers(bool $reusePreparedMappings): void
+    {
+        foreach ([false, true] as $providerBacked) {
+            $childMapper = new class implements CustomObjectMapperInterface {
+                public int $calls = 0;
+
+                public function map(object $source): object
+                {
+                    ++$this->calls;
+                    if (2 === $this->calls) {
+                        return new stdClass();
+                    }
+                    TestCase::assertInstanceOf(Release::class, $source);
+
+                    return new ReleaseDto($source->version);
+                }
+            };
+            $provider = new RecordingCustomMapperProvider([
+                'child' => $childMapper,
+            ]);
+            $registry = new MappingRegistry([
+                $providerBacked
+                    ? new ProviderCustomMappingDefinition(Release::class, ReleaseDto::class, 'child')
+                    : new CustomMappingDefinition(Release::class, ReleaseDto::class, $childMapper),
+                new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+                    'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+                ]),
+            ]);
+            $cache = new MapperCache(
+                new MappingMetadataFactory(mappingRegistry: $registry),
+                new PhpMapperGenerator(), $this->cacheDirectory, new ValueTransformerRegistry(),
+                generateOnDemand: true, mappingRegistry: $registry, customObjectMapperProvider: $provider,
+                reusePreparedMappings: $reusePreparedMappings,
+            );
+            $mapper = new ObjectMapper($registry, $cache);
+            $mapper->warmup();
+            self::assertEquals(new ReleaseCollectionDto([]), $mapper->map(new ReleaseCollectionSource([]), ReleaseCollectionDto::class));
+            self::assertSame(0, $provider->lookups);
+            self::assertSame(0, $childMapper->calls);
+
+            try {
+                $mapper->map(new ReleaseCollectionSource([
+                    'first' => new Release('one'),
+                    9       => new Release('two'),
+                    'last'  => new Release('three'),
+                ]), ReleaseCollectionDto::class);
+                self::fail('Expected the second mapped target to fail validation.');
+            } catch (MappingExecutionFailed $exception) {
+                self::assertSame('Could not execute mapping ' . ReleaseCollectionSource::class . '->' . ReleaseCollectionDto::class . '.', $exception->getMessage());
+                self::assertNull($exception->getPrevious());
+            }
+            self::assertSame(2, $childMapper->calls);
+            self::assertSame($providerBacked ? 2 : 0, $provider->lookups);
+            self::assertEquals(new ReleaseCollectionDto([new ReleaseDto('recovered')]), $mapper->map(new ReleaseCollectionSource([
+                'original-key' => new Release('recovered'),
+            ]), ReleaseCollectionDto::class));
+            self::assertSame(3, $childMapper->calls);
+            self::assertSame($providerBacked ? 3 : 0, $provider->lookups);
+        }
+    }
+
+    #[DataProvider('collectionCacheModes')]
     public function testPublicCacheReentryRestoresOuterMappingAfterExecutionAndPreparationFailures(bool $prepared): void
     {
         [$mapper, $cache, $target] = $this->leafCallbackRuntime($prepared, 'getter');

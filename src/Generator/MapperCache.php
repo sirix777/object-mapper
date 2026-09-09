@@ -283,7 +283,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
 
         $definition = $dependency['definition'];
         if (! $definition instanceof MappingDefinition) {
-            return null;
+            return $this->mapCustomCollection($mappingExecutionContext, $parentFrame, $definition, $parameter, $values);
         }
 
         if ($dependency['hasStructuralMappings']) {
@@ -387,6 +387,55 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
             $details['expected'],
             $details['actualType'],
         );
+    }
+
+    /**
+     * @param array<int|string, mixed> $values
+     *
+     * @return list<object>
+     */
+    private function mapCustomCollection(
+        MappingExecutionContext $mappingExecutionContext,
+        MappingExecutionFrame $mappingExecutionFrame,
+        CustomMappingDefinition|ProviderCustomMappingDefinition $definition,
+        string $parameter,
+        array $values,
+    ): array {
+        $elementSource   = $definition->source();
+        $elementTarget   = $definition->target();
+        $sourceMatchMode = SourceMatcher::modeFor($definition);
+        $mapped          = [];
+        foreach ($values as $key => $element) {
+            if (! is_object($element) || ! SourceMatcher::matches($element, $elementSource, $sourceMatchMode)) {
+                $this->collectionElementTypeFailure($mappingExecutionFrame->definition->source, $mappingExecutionFrame->definition->target, $parameter, $key, $elementSource, $element);
+            }
+
+            // The compiled binding is already checked; providers still resolve per item.
+            $mappingExecutionContext->currentFrame = null;
+
+            try {
+                $result = $this->customMappingExecutor->map($definition, $element);
+            } finally {
+                $mappingExecutionContext->currentFrame = $mappingExecutionFrame;
+            }
+
+            if (! $result instanceof $elementTarget) {
+                if ($definition instanceof ProviderCustomMappingDefinition) {
+                    throw new MappingExecutionFailed(sprintf('Could not execute mapping %s.', $definition->key()));
+                }
+
+                throw new MappingCompilationFailed(sprintf(
+                    'Nested mapping %s returned %s instead of an instance of %s.',
+                    $definition->key(),
+                    $result::class,
+                    $elementTarget,
+                ));
+            }
+
+            $mapped[] = $result;
+        }
+
+        return $mapped;
     }
 
     private function executeCustom(

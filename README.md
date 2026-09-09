@@ -95,7 +95,7 @@ Cycle lazy loading, so applications remain responsible for query preloading and
 avoiding N+1 queries before mapping.
 
 The source-match choice participates in generated-mapper cache identity.
-The current development version uses format `7`; generated files remain
+Release `0.9.0` uses format `7`; generated files remain
 owner-only (`0600`). See [deployment instructions](#upgrading-generated-cache-to-format-7).
 
 ## Customize a conventional mapping
@@ -200,14 +200,16 @@ the element value. Integer keys are shown directly; string keys are represented
 by a stable SHA-256 prefix and length, so secret or control-character keys do
 not enter logs.
 
-Conventional leaf elements (including transformer-backed leaves) use a
+Conventional leaf elements (including transformer-backed leaves), direct custom
+mappers, and provider-backed custom mappers use a
 runtime-owned collection loop that resolves the declared child dependency once
 per collection. Each attempted element executes behind an isolation barrier. Elements
 are validated and mapped in input order, so callbacks for earlier valid items
 still run before a later invalid item fails. Standalone generated mappers keep
-their source-type checks. Children with nested or collection rules, and direct
-or provider-backed custom children, retain the generated per-element dispatch
-path; providers resolve once per attempted element invocation. Custom mapper
+their source-type checks. Conventional children with nested or collection rules
+retain the generated per-element dispatch path. Custom collections bind the
+definition once, validate each source and returned target, and resolve providers
+once per attempted element invocation. Custom mapper
 callbacks and provider resolution now run without an enclosing mapping's
 declared dependency authority, preventing dispatch of enclosing-only siblings
 or forged collection errors. This isolation covers nested mappings and
@@ -455,14 +457,22 @@ current-process user/system CPU time, and PHP-memory deltas. CPU time excludes
 child processes, so do not use the cold-first result as a total deployment CPU
 measurement: it includes generated-file linting in a child PHP process.
 
-For release `0.8.0`, an illustrative run on this project's PHP 8.2 CLI
-environment (OPcache CLI and JIT disabled) after warmup produced:
+For release `0.9.0`, a seven-round run after warmup produced the following
+medians. The run used PHP 8.5.8 CLI on an
+Intel Core Ultra 5 135U, pinned to one CPU; OPcache CLI was enabled, while JIT,
+PCOV, and Xdebug were disabled:
 
 | Scenario | Default | Prepared | CPU time per mapping |
 | --- | ---: | ---: | ---: |
-| Simple DTO | 5,064 ops/s | 612,920 ops/s | 0.1966 ms → 0.00162 ms |
-| Nested DTO | 1,684 ops/s | 213,770 ops/s | 0.5823 ms → 0.00468 ms |
-| Collection of 100 DTOs | 1,534 ops/s | 7,118 ops/s | 0.6509 ms → 0.1404 ms |
+| Simple DTO | 8,814 ops/s | 1,631,152 ops/s | 0.113335 ms → 0.000614 ms |
+| Nested DTO | 3,220 ops/s | 346,640 ops/s | 0.312951 ms → 0.002886 ms |
+| Collection of 100 DTOs | 3,029 ops/s | 38,459 ops/s | 0.330580 ms → 0.026020 ms |
+
+Reproduce this table with:
+
+```sh
+XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --workload=legacy --rounds=7
+```
 
 The hot-path runs retained no additional PHP allocator memory between rounds.
 Run the benchmark on target hardware and compare ratios rather than treating
@@ -470,203 +480,108 @@ these absolute values as a production capacity guarantee.
 
 ### Benchmarking execution contexts
 
-The benchmark also has execution-context workloads for flat, deep nested,
-diamond, collection, native-Fiber, and expected-failure paths. Each reports
-out-of-loop correctness checks plus repeated-call PHP and allocator-retention
-deltas; the Fiber workload constructs and warms the mapper before timing
-suspend/resume operations. `--runtime-root` selects the library source to
-measure while keeping this physical harness fixed; it is fail-closed: a missing
-or mismatched selected runtime class aborts the benchmark instead of falling
-back to the harness checkout. The JSON `runtime_isolation` record verifies the
-loaded class provenance; all final JSON reported `verified` with 15 class-file
-records. Use the selected root for both revisions.
-`--execution-context-mode=prepared`, `default`, and `both` select the prepared
-cache, ordinary cache, or both modes respectively (`both` is the default).
+Release `0.9.0` includes workloads for flat, deep nested, diamond, collection,
+native-Fiber, and expected-failure paths. Each reports correctness checks
+outside timing and repeated-call PHP and allocator-retention deltas.
+The Fiber workload constructs and warms the mapper before timing suspend/resume
+operations.
 
-For the canonical prepared-cache comparison, run the harness from one fixed
-checkout and substitute each revision's absolute source root. Keep
-`XDEBUG_MODE=off`, CPU affinity, PHP settings, iterations, and rounds identical:
+Use the `0.9.0` harness from one fixed checkout to compare `0.8.0` and `0.9.0`.
+`--runtime-root` selects the library source while keeping the physical harness
+and fixtures identical. A missing or mismatched runtime class aborts the run;
+the JSON `runtime_isolation` record verifies which source tree was loaded.
+`--execution-context-mode=prepared`, `default`, or `both` selects the cache
+mode (`both` is the default). Keep PHP settings, CPU affinity, iterations,
+and rounds identical across versions:
 
 ```sh
-XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/baseline --workload=contexts --execution-context-mode=prepared --simple-iterations=200000 --collection-iterations=5000 --context-iterations=30000 --fiber-iterations=30000 --rounds=7
-XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/candidate --workload=contexts --execution-context-mode=prepared --simple-iterations=200000 --collection-iterations=5000 --context-iterations=30000 --fiber-iterations=30000 --rounds=7
+XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/0.8.0 --workload=contexts --execution-context-mode=prepared --simple-iterations=200000 --collection-iterations=5000 --context-iterations=30000 --fiber-iterations=30000 --rounds=5
+XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/0.9.0 --workload=contexts --execution-context-mode=prepared --simple-iterations=200000 --collection-iterations=5000 --context-iterations=30000 --fiber-iterations=30000 --rounds=5
 ```
 
 Use `--workload=flat`, `collection`, `deep`, `diamond`, `fiber`, or `failure`
-to repeat one shape. `--workload=collections` remains the legacy collection
-matrix selector; it is not the execution-context collection shape. Compare
-alternating revision runs rather than a single absolute timing, and keep setup,
-warmup, source construction, and correctness checks outside the measured loop.
-JSON records effective PHP settings, wall and current-process CPU time, and
-memory measurements; child-process CPU time is not included.
+to repeat one shape. `--workload=collections` selects the separate collection
+matrix. Alternate versions across runs, and keep setup, warmup, source
+construction, and correctness checks outside the measured loop.
 
-Current behavioral verification covers suspended/resumed native-Fiber nested
-getter, transformer, and custom-mapper calls; independent main-context work
-while a Fiber is suspended; public-cache reentry after execution and partial
-preparation failures; failure provenance; and weak-reference cleanup. The
-focused scenarios passed 24 tests / 558 assertions, and the integration suite
-passed 181 tests / 2,543 assertions. The final complete suite passed 267 tests /
-2,876 assertions.
-
-The verified comparison uses one physical harness (SHA-256
-`0d5e7d12563c9a5e35514291cb3257cc71423bccfdb6a59fda2da002d6747497`) and
-baseline `d0ca7c4` (runtime hash `2a802440...f5c92e`) against the candidate
-(runtime hash `2c74db...f4c0e`). It ran on PHP 8.5.8 CLI, pinned to CPU 2, with
-OPcache on, JIT disabled, PCOV false, and `XDEBUG_MODE=off`. Seven prepared
-rounds had medians of roughly 73–281 ms. The paired ratios below are
-baseline-ms/candidate-ms, so values above 1 favour the candidate:
-
-| Workload | A/B | C/D |
-| --- | ---: | ---: |
-| Flat | 1.086 | 1.045 |
-| Collection | 1.149 | 1.101 |
-| Deep | 1.122 | 1.043 |
-| Diamond | 1.114 | 0.890 |
-| Native Fiber | 1.115 | 1.061 |
-| Leaf expected failure | 0.974 | 0.963 |
-| Structural expected failure | 0.950 | 0.962 |
-
-All repeated-call retention and allocator deltas were zero. OPcache-on
-single-workload controls confirmed collection (1.121/1.173), deep
-(1.053/1.225), and diamond (1.114/1.063). The fail-closed OPcache-off balanced
-A/B/B/A repeat confirmed deep (1.097/1.062) and diamond (1.108/1.105).
-
-Fiber is inconclusive because it was sensitive to order and run frequency: the
-focused A/B/A/B result was 0.841/0.878, while reverse B/A/A/B measured
-baseline/candidate as 1.093/1.088. It therefore supports neither a Fiber gain
-nor a Fiber regression. The small expected-failure losses overlap run-to-run
-variation in an exception-dominated path and are not claimed as an improvement.
-
-The low-duration default controls (seven rounds; simple 2,000 and
-collection/context/Fiber 500 iterations) varied strongly and their ratios
-changed sign. That path includes unchanged preparation, cache, and source
-validation, so it cannot attribute a regression to execution contexts. The
-earlier blocked result used only 100 context/Fiber and 10 collection iterations,
-producing 0.1–2.3 ms prepared rounds while the documented protocol required
-10,000 context iterations; it published only those noisy default medians.
-
-The performance gate passes on repeatable prepared deep, diamond, and
-collection gains plus zero retention; the remaining workloads showed no
-unexplained regression beyond measured variation. These microbenchmarks do not
-make an FPM throughput or capacity claim; repeat them on deployment hardware.
+Release `0.9.0` passed 271 tests / 3,014 assertions on PHP 8.2–8.5. Coverage
+includes suspended/resumed getters, transformers and custom mappers, failed
+provider lookups, independent main-context work, public-cache reentry, partial
+preparation failures, failure provenance, and weak-reference cleanup.
+Native Fiber verification does not establish Swoole coroutine support.
 
 ### Benchmarking lightweight leaf execution
 
-This comparison uses baseline `81845e5`, which already includes the collection
-optimization below. Baseline runs preloaded its original `MapperCache` class;
-both revisions ran the same physical fixture/harness file (SHA-256
-`1384b9374b8287ceb3a82a398027828b084ad82335f9307628d40db8f31c320e`).
-Measurements used PHP 8.5.8 CLI on an Intel Core Ultra 5 135U under Microsoft
-virtualization, pinned to CPU 2 with `taskset`, OPcache on/off, JIT/PCOV off,
-and no active Xdebug modes.
+Release `0.9.0` avoids structural execution tables for conventional mappings
+without nested or collection rules. Prepared calls reuse the classification
+recorded during preparation; getters, transformers and constructors retain
+their isolation and exception guarantees.
 
-Each workload ran five rounds in baseline/candidate/candidate/baseline (ABBA)
-order, with 10,000 iterations for each leaf workload and 100 for collections:
-
-```sh
-taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --workload=flat --iterations=10000 --rounds=5
-taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --workload=collections --iterations=100 --rounds=5
-```
-
-Repeat the first command with `--workload=getter-transformer` and
-`--workload=nested`, and both with `-d opcache.enable_cli=0`. Collections cover
-sizes 0, 1, 100, and 1000 in default/prepared modes. An extra nested ABBA run used
-10,000 iterations; prepared collection followups used 20,000 empty-collection
-calls and 300 calls at size 1000, including rapid single-workload comparisons.
-Startup, warmup, source construction, and correctness checks were outside timing.
-
-| Prepared workload | Paired candidate/baseline throughput |
-| --- | ---: |
-| Flat DTO, OPcache on/off | 1.97–2.47× |
-| Getter/transformer leaf, OPcache on/off | 1.88–2.67× |
-| Nested leaf, OPcache on (initial and followup) | 1.19–1.33× |
-| 1000-item collection controls, OPcache on (rapid followups) | 1.007–1.037× |
-
-Empty prepared custom collections with OPcache off showed an accepted tradeoff:
-0.953×/0.958× throughput, or +0.153/+0.131 µs per call. Added root dispatch/setup
-is a plausible explanation, but its causal cost was not measured. Other control
-timings were noisy: the initial default nested slowdown did not repeat, and
-identical-code provider runs varied from 0.909× to 1.076×. No per-element
-regression beyond that variability was established. These CLI results imply
-neither zero overhead nor production/FPM capacity.
-
-All repeated-call retention probes reported zero growth. Prepared flat/getter
-peak used-memory deltas fell from 1808/1800 to 96/88 bytes, with unchanged
-prepared warmup retention; flat CPU time per 10,000 calls fell from 16.0–17.0
-to 6.6–8.3 ms. CPU measurements cover only the current PHP process.
-Default warmup retention matched in every pair except custom collections with
-OPcache off: 14,416 → 79,952 bytes in both pairs (+65,536 bytes during warmup,
-with no repeated-call growth); all prepared warmup retention matched.
+Use `--workload=flat`, `getter-transformer`, or `nested` with the same harness
+and each version's `--runtime-root` to compare these workloads with `0.8.0`.
+The [prepared-mapping table](#benchmarking-prepared-mappings) reports absolute
+`0.9.0` measurements; the [collection comparison](#benchmarking-collection-execution)
+below reports throughput ratios against `0.8.0`.
 
 ### Benchmarking collection execution
 
-The collection workloads cover sizes 0, 1, 100, and 1000 for conventional
-leaves, structural children, transformer-backed leaves, direct custom mappers,
-and provider-backed custom mappers, in default and prepared-cache modes:
+The collection matrix covers sizes 0, 1, 100, and 1000 for conventional leaves,
+structural children, transformer-backed leaves, direct custom mappers, and
+provider-backed custom mappers, in default and prepared-cache modes:
 
 ```sh
-php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --workload=collections --iterations=100 --rounds=5
+XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/0.8.0 --workload=collections --iterations=200 --rounds=5
+XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/0.9.0 --workload=collections --iterations=200 --rounds=5
 ```
 
 JSON includes collections/s, items/s, per-round timings, CPU and memory
-measurements, and retained-memory checks across repeated calls. Repeat with
-`-d opcache.enable_cli=0` for the non-OPcache comparison. An empty collection
-has zero items/s; use collections/s to compare its overhead.
+measurements, and retained-memory checks. An empty collection has zero items/s;
+use collections/s to compare its overhead. Repeat with `-d opcache.enable_cli=0`
+for a non-OPcache comparison. Disable coverage and profiling uniformly.
 
-Disable coverage and profiling uniformly in both revisions, including PCOV
-and any active Xdebug modes. Instrumenting only the workspace source can make
-an archived baseline appear faster even with otherwise identical PHP settings.
+Both versions must load the same physical fixture file: default-cache mode
+hashes source files, so comparing different fixture locations can distort
+results.
 
-The comparison baseline for this collection change is revision `38f002c` with
-the same updated benchmark harness. Both revisions must load the exact same
-physical benchmark fixture file from the same storage: default-cache mode
-hashes source files, so comparing a temporary copy with a workspace file can
-distort the ratio. Select each revision's library source through its autoloader
-while keeping the benchmark fixture path fixed. These historical collection
-measurements predate lightweight leaf execution; they are not incremental gains
-over it. They also predate the execution-context runtime work, so they are not
-an incremental comparison for that change. See the [separate leaf
-comparison](#benchmarking-lightweight-leaf-execution) for the subsequent change
-against `81845e5`.
+A focused comparison used PHP 8.5.8 CLI, pinned to CPU 2, with OPcache on and
+JIT/PCOV/Xdebug off. One physical harness copy was restricted to one shape,
+prepared mode, and 1000 elements. Each run measured five rounds of 1000
+collections; the version comparison used `0.9.0 / 0.8.0 / 0.8.0 / 0.9.0` order.
 
-On PHP 8.5.8 CLI, Linux x64, with OPcache on, JIT/PCOV off and no active
-Xdebug, two alternating baseline/candidate runs of five rounds each produced
-the following ranges of run medians for collections of 1000 items. Both
-revisions used the same physical workspace fixture file.
+| Prepared collection, 1000 elements | 0.8.0 collections/s | 0.9.0 collections/s | 0.9.0 / 0.8.0 throughput |
+| --- | ---: | ---: | ---: |
+| Conventional leaf | 757–773 | 4,139–4,194 | 5.351–5.543× |
+| Direct custom | 1,758–1,763 | 3,962–4,055 | 2.247–2.307× |
+| Provider custom | 1,545–1,563 | 3,009–3,063 | 1.947–1.960× |
 
-| Scenario | Baseline collections/s | Candidate collections/s |
-| --- | ---: | ---: |
-| Prepared leaf | 579–628 | 2,582–3,308 |
-| Default leaf | 184–508 | 1,547–1,838 |
-| Prepared transformer | 457–588 | 1,794–2,193 |
-| Prepared structural | 302–338 | 288–376 |
-| Prepared custom | 1,481–1,587 | 918–1,251 |
-| Prepared provider | 1,322–1,344 | 804–1,099 |
+Ratios compare paired run medians; they are not confidence intervals or
+application speedups. Multiply collections/s by 1000 to obtain items/s.
+All repeated-call retention probes were zero. The full 40-workload matrix
+also passed its correctness and retention checks, but variable control timings
+make it less suitable for attributing small performance differences.
 
-Multiply by 1000 for items/s: prepared leaves reached 2.582–3.308 million
-items/s versus 0.579–0.628 million, a 4.46–5.27× gain in paired run medians.
-For the 1000-item prepared leaf, default leaf and prepared transformer
-workloads, all ten candidate timings beat all respective baseline timings;
-even the slowest candidate beat the fastest baseline
-by 3.12× for prepared leaves, 2.82× for default leaves and 2.60× for prepared
-transformers. Small conventional collections showed no repeatable slowdown;
-structural timing ranges overlapped.
+To repeat the focused comparison, use one frozen copy of `tools/benchmark.php`
+for both versions and restrict `benchmarkCollections()` to one shape (`custom`,
+`provider`, or `leaf`), prepared mode, and size 1000; use
+`--iterations=1000 --rounds=5`. Keep its autoloader pointed at the installed
+dependencies and retain the same physical fixture path across runs.
 
-Prepared custom/provider throughput was 18–39% lower in paired comparisons.
-These paths now enforce the custom-callback isolation described above, which
-the baseline lacked. This is an explicit security/performance tradeoff, but
-the measurement does not isolate the barrier's cost: substantial host noise
-also affected unchanged controls. Repeat measurements on deployment hardware.
+These CLI measurements do not establish FPM capacity or an OPcache-off speedup.
+Repeat representative workloads on deployment hardware with the real providers
+and custom mappers used by the application.
 
-All 160 workload/run combinations showed zero retained-memory growth in both
-repeated-call blocks. Default warmup retained 162,208 bytes versus 161,008
-(+1,200 bytes); incremental prepared warmup remained 20,136 bytes. All 40
-workloads also passed a five-round OPcache-off smoke run; no OPcache-off
-speedup is claimed.
+### Custom/provider collection follow-up
+
+In `0.9.0`, custom collections bind the validated definition once and execute
+through the existing custom executor inside an isolated per-element boundary.
+Provider lookup remains per element; returned targets are checked before
+proceeding to the next item. Source matching, callback order, and error
+sanitization are preserved. The [version comparison above](#benchmarking-collection-execution)
+includes this optimization when comparing `0.9.0` with `0.8.0`.
 
 ## Upgrading generated cache to format 7
 
-The collection execution change bumps generated-mapper cache format from `6`
+Upgrading from `0.8.0` to `0.9.0` changes generated-mapper cache format from `6`
 to `7`. Format-6 files are not reused. Deploy the application code and trusted
 registrations, rotate the previous cache directory, and warm the new
 owner-only (`0700`) cache as the runtime owner before serving traffic. Generated
@@ -677,7 +592,7 @@ Restart or reload every long-running PHP worker so it loads the new runtime
 and generated mappers; this is required for workers using prepared-mapping
 reuse too. Do not mix an old runtime with newly generated format-7 code.
 
-## Upgrading to 0.8.0
+## Upgrading to 0.9.0
 
 Create one `MappingRegistry` during application wiring and pass that same
 instance to both `MappingMetadataFactory` and `MapperCache` for structural
@@ -688,10 +603,11 @@ and `MapperCache`, as shown above. `warmup()` skips every custom mapping,
 including provider-backed children: it neither resolves a provider nor creates
 or executes a custom mapper.
 
-Release `0.8.0` retains generated-mapper cache format `6`; no generated-cache
-or cache-identity migration is required. Deploy the updated code and trusted
-registrations, then warm the owner-only (`0700`) cache as the runtime owner
-before serving traffic.
+Release `0.9.0` preserves public mapping interfaces and application wiring,
+but changes generated-mapper cache format from `6` in `0.8.0` to `7`.
+Follow the [cache migration instructions](#upgrading-generated-cache-to-format-7):
+deploy the updated code and registrations, warm a new owner-only (`0700`) cache,
+and restart or reload long-running workers before serving traffic.
 
 ## Mapping rules and guarantees
 

@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-09-09
 
 ### Changed
 
@@ -14,17 +14,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   independent declared-dependency boundaries and failure provenance. Cleanup
   also covers partial preparation and callback failures; completed frames retain
   no mapped objects, caught failures, or request-scoped collaborators. Public
-  APIs, generated format `7`, and prepared-cache lifecycle are unchanged.
+  APIs and prepared-cache lifecycle are unchanged.
 - Conventional root and nested leaves avoid structural execution tables, using
   eligibility recorded during preparation without rescanning warm prepared calls.
-  This change preserves public APIs, generated format `7`, prepared-cache
-  ownership/lifecycle, and default source-file invalidation.
+  This change preserves public APIs, prepared-cache ownership/lifecycle,
+  and default source-file invalidation.
 - Conventional leaf collections, including transformer-backed leaves, bind the
   declared child dependency once per collection in a runtime-owned loop. Child
   execution remains isolated per element, with ordered validation and callbacks,
   unchanged null/list semantics, exact/Cycle matching, and sanitized input keys.
-  Structural and direct/provider-custom children retain generated per-element
-  dispatch; providers still resolve once per attempted invocation.
+  Structural conventional children retain generated per-element dispatch.
+- Direct/provider-custom collections now also bind their validated dependency
+  once per collection, eliminating repeated nested dispatch and source checks.
+  Per-item source/target validation, provider resolution, callback isolation,
+  ordered failures, and context restoration remain intact. Format-7 generated
+  collection helpers use the new runtime path.
 - Generated code optionally uses the internal `CollectionMappingRuntimeInterface`;
   existing `NestedMappingRuntimeInterface` implementations and the public
   `ObjectMapper::map()` entry remain compatible. No reusable binding handle or
@@ -37,51 +41,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Leaf benchmarks against `81845e5` with a frozen shared harness: prepared flat
-  mappings improved 1.97–2.47×, getter/transformer leaves 1.88–2.67×, and nested
-  leaves with OPcache 1.19–1.33×. Empty prepared custom collections without
-  OPcache measured 0.953×/0.958× (+0.153/+0.131 µs per call); attribution remains
-  unconfirmed. See [environment, protocol, and limits](README.md#benchmarking-lightweight-leaf-execution).
-- Regression verification passed on PHP 8.2.32, 8.3.32, 8.4.23, and 8.5.8
-  (257 tests / 2712 assertions each), with final `composer check` passing.
-- Execution-context regressions passed: 24 focused tests / 558 assertions and
-  181 integration tests / 2,543 assertions cover interleaved native Fibers,
-  resumed nested getter/transformer/custom-mapper calls, public-cache reentry,
-  failure provenance, partial preparation failures, and weak-reference cleanup.
-  The final complete suite passed 267 tests / 2,876 assertions.
-  The benchmark harness now provides reproducible flat, deep, diamond,
-  collection, native-Fiber, and expected-failure context workloads with
-  correctness and repeated-call retention probes. An identical-harness A/B/A/B
-  comparison against baseline `d0ca7c4`, using one harness and seven stable
-  prepared rounds on PHP 8.5.8 CLI (CPU 2; OPcache on; JIT/PCOV off;
-  `XDEBUG_MODE=off`), together with additional focused and balanced controls,
-  found repeatable deep/diamond/collection gains; the full A/B/A/B diamond pair
-  was mixed. The fail-closed `--runtime-root` check recorded
-  `runtime_isolation=verified` with 15 class provenance records in every final
-  JSON. All success and failure repeated-retention and allocator deltas were
-  zero; OPcache-off controls found no repeatable unexplained regression beyond
-  same-version variation. Fiber was order/frequency-sensitive and is
-  inconclusive; exception-dominated failure results are not claimed as gains.
-  The performance gate passes. See [the
-  protocol, ratios, and limits](README.md#benchmarking-execution-contexts).
-- Collection benchmarks for sizes 0, 1, 100, and 1000 across leaf, structural,
-  transformer, direct-custom, and provider-custom children, with default and
-  prepared-cache execution, raw timings, items/s and retention probes. The
-  comparison baseline is revision `38f002c` using the identical harness. These
-  measurements predate lightweight leaf execution and the execution-context
-  runtime work; they are not incremental results for either later change.
-- On PHP 8.5.8 CLI with OPcache on and JIT/coverage off, prepared collections
-  of 1000 conventional leaves improved 4.46–5.27× in paired run medians versus
-  `38f002c`. Prepared custom/provider throughput was 18–39% lower alongside
-  the required callback isolation fix; noisy controls prevent attributing the
-  whole difference to isolation. See the [measurement protocol and results](README.md#benchmarking-collection-execution).
+- Regression coverage for wrong-target short-circuiting, recovery, suspended
+  or failed provider lookups, native Fiber interleaving, public-cache reentry,
+  partial preparation failures, diagnostic provenance, and weak-reference
+  cleanup. The complete suite passed 271 tests / 3,014 assertions on PHP
+  8.2.32, 8.3.32, 8.4.23, and 8.5.8.
+- Reproducible flat, getter/transformer, nested, deep, diamond, collection,
+  native-Fiber, and expected-failure benchmarks with correctness and retention
+  probes. The `--runtime-root` option verifies the selected runtime source
+  while keeping one physical harness for comparisons between `0.8.0` and
+  `0.9.0`.
+- Focused prepared collections of 1000 elements improved 5.351–5.543× for
+  conventional leaves, 2.247–2.307× for direct custom, and 1.947–1.960× for
+  provider custom in `0.9.0` versus `0.8.0`, retaining callback isolation.
+  Measurements used PHP 8.5.8 CLI with OPcache on and JIT/coverage off.
+  Repeated-call retention probes were zero; the full 40-workload collection
+  matrix also passed correctness and retention checks. See the
+  [comparison protocol and limits](README.md#benchmarking-collection-execution).
 
 ### Security
 
 - Root, nested, and collection leaf getters, transformers, and constructors run
   behind an isolation barrier. Replayed parent diagnostics are sanitized even
-  with unconsumed provenance; eight new regression cases fail on the baseline
-  and pass on the candidate. Enclosing scopes restore on success or failure.
+  with unconsumed provenance; eight regression cases fail on `0.8.0`
+  and pass on `0.9.0`. Enclosing scopes restore on success or failure.
 - Custom mapper callbacks and provider resolution no longer inherit an enclosing
   mapping's declared dependency authority. This prevents dispatch of enclosing-only
   siblings and forged collection errors for nested/collection custom mappings
