@@ -135,6 +135,10 @@ use Sirix\ObjectMapperTest\Support\ThrowingGetterSource;
 use Sirix\ObjectMapperTest\Support\ThrowingTransformer;
 use Sirix\ObjectMapperTest\Support\TokenHolderDto;
 use Sirix\ObjectMapperTest\Support\TokenHolderSource;
+use Sirix\ObjectMapperTest\Support\TwoCycleDtoA;
+use Sirix\ObjectMapperTest\Support\TwoCycleDtoB;
+use Sirix\ObjectMapperTest\Support\TwoCycleSourceA;
+use Sirix\ObjectMapperTest\Support\TwoCycleSourceB;
 use Sirix\ObjectMapperTest\Support\Uuid;
 use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
 use Sirix\ObjectMapperTest\Support\VirtualGetOnlySource;
@@ -2303,6 +2307,37 @@ final class ObjectMapperTest extends TestCase
                     );
                 }
             }
+        }
+    }
+
+    public function testWarmupDeduplicatesStructuredCycles(): void
+    {
+        $self = new MappingDefinition(SelfCycleSource::class, SelfCycleDto::class, [
+            'child' => MapRule::from('child')->nested(SelfCycleDto::class),
+        ]);
+        $twoA = new MappingDefinition(TwoCycleSourceA::class, TwoCycleDtoA::class, [
+            'child' => MapRule::from('child')->nested(TwoCycleDtoB::class),
+        ]);
+        $twoB = new MappingDefinition(TwoCycleSourceB::class, TwoCycleDtoB::class, [
+            'child' => MapRule::from('child')->nested(TwoCycleDtoA::class),
+        ]);
+        $threeA = new MappingDefinition(IndirectCycleSourceA::class, IndirectCycleDtoA::class, [
+            'child' => MapRule::from('child')->nested(IndirectCycleDtoB::class),
+        ]);
+        $threeB = new MappingDefinition(IndirectCycleSourceB::class, IndirectCycleDtoB::class, [
+            'child' => MapRule::from('child')->nested(IndirectCycleDtoC::class),
+        ]);
+        $threeC = new MappingDefinition(IndirectCycleSourceC::class, IndirectCycleDtoC::class, [
+            'child' => MapRule::from('child')->nested(IndirectCycleDtoA::class),
+        ]);
+
+        $mapper = $this->mapper(false, $self, $twoA, $twoB, $threeA, $threeB, $threeC);
+
+        try {
+            $mapper->warmup();
+            self::fail('Expected warmup to report dependency cycles.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertSame(3, substr_count($exception->getMessage(), 'dependency cycle detected'));
         }
     }
 

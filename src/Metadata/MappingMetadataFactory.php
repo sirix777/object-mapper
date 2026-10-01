@@ -54,7 +54,7 @@ final class MappingMetadataFactory
     /** @var WeakMap<MappingCompilationFailed, true> */
     private WeakMap $reentrantCompilationFailures;
 
-    /** @var WeakMap<MappingCompilationFailed, true> */
+    /** @var WeakMap<MappingCompilationFailed, array{message: string, cycle: null|list<string>}> */
     private WeakMap $trustedCompilationFailures;
 
     /** @var list<string> */
@@ -118,7 +118,10 @@ final class MappingMetadataFactory
 
             return $this->compile($mappingDefinition);
         } catch (MappingCompilationFailed $mappingCompilationFailed) {
-            $this->trustedCompilationFailures[$mappingCompilationFailed] = true;
+            $this->trustedCompilationFailures[$mappingCompilationFailed] ??= [
+                'message' => $mappingCompilationFailed->getMessage(),
+                'cycle'   => null,
+            ];
 
             throw $mappingCompilationFailed;
         } finally {
@@ -164,11 +167,25 @@ final class MappingMetadataFactory
     /** @internal */
     public function trustedCompilationFailureMessage(Throwable $throwable): ?string
     {
-        if (! $throwable instanceof MappingCompilationFailed || ! isset($this->trustedCompilationFailures[$throwable])) {
+        if (! $throwable instanceof MappingCompilationFailed) {
             return null;
         }
 
-        return $throwable->getMessage();
+        return $this->trustedCompilationFailures[$throwable]['message'] ?? null;
+    }
+
+    /**
+     * @internal
+     *
+     * @return null|list<string>
+     */
+    public function trustedCompilationFailureCycle(Throwable $throwable): ?array
+    {
+        if (! $throwable instanceof MappingCompilationFailed) {
+            return null;
+        }
+
+        return $this->trustedCompilationFailures[$throwable]['cycle'] ?? null;
     }
 
     /** @return null|array{bindings: WeakMap<NestedMappingMetadata, MappingDefinitionInterface>, metadata: WeakMap<NestedMappingMetadata, MappingMetadata>} */
@@ -893,7 +910,13 @@ final class MappingMetadataFactory
         if (false !== $cycleStart) {
             $cycle = [...array_slice($this->dependencyStack, $cycleStart), $key];
 
-            throw new MappingCompilationFailed(sprintf('%s: mapping dependency cycle detected: %s.', $cycleContext, implode(' -> ', $cycle)));
+            $mappingCompilationFailed                                    = new MappingCompilationFailed(sprintf('%s: mapping dependency cycle detected: %s.', $cycleContext, implode(' -> ', $cycle)));
+            $this->trustedCompilationFailures[$mappingCompilationFailed] = [
+                'message' => $mappingCompilationFailed->getMessage(),
+                'cycle'   => $cycle,
+            ];
+
+            throw $mappingCompilationFailed;
         }
 
         if (isset($this->dependencyFingerprints[$key])) {

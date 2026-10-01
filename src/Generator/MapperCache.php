@@ -186,6 +186,16 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
     }
 
     /**
+     * @internal
+     *
+     * @return null|list<string>
+     */
+    public function trustedWarmupFailureCycle(Throwable $throwable): ?array
+    {
+        return $this->mappingMetadataFactory->trustedCompilationFailureCycle($throwable);
+    }
+
+    /**
      * @param class-string $source
      * @param class-string $target
      */

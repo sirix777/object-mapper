@@ -19,7 +19,6 @@ use Sirix\ObjectMapper\Generator\MapperCache;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Throwable;
 
-use function array_key_last;
 use function array_keys;
 use function array_pop;
 use function array_search;
@@ -27,12 +26,9 @@ use function array_shift;
 use function array_slice;
 use function array_unique;
 use function array_values;
-use function count;
-use function explode;
 use function get_parent_class;
 use function implode;
 use function ksort;
-use function preg_match;
 use function sort;
 use function sprintf;
 
@@ -201,8 +197,9 @@ final readonly class ObjectMapper implements WarmableObjectMapperInterface
                 $processed[$key] = true;
             } catch (Throwable $exception) {
                 $trustedFailureMessage = $this->mapperCache->trustedWarmupFailureMessage($exception);
-                $cycle                 = null === $trustedFailureMessage ? null : $this->trustedMetadataCycle($trustedFailureMessage);
-                if (null !== $cycle) {
+                $structuredCycle       = $this->mapperCache->trustedWarmupFailureCycle($exception);
+                if (null !== $structuredCycle) {
+                    $cycle    = $this->canonicalCycle($structuredCycle);
                     $cycleKey = implode("\0", $cycle);
                     if (! isset($reportedCycles[$cycleKey])) {
                         $failures[]                = sprintf('Mapper warmup dependency cycle detected: %s.', implode(' -> ', $cycle));
@@ -212,7 +209,7 @@ final readonly class ObjectMapper implements WarmableObjectMapperInterface
                     continue;
                 }
 
-                $failures[]            = sprintf(
+                $failures[] = sprintf(
                     '%s: %s',
                     $key,
                     $trustedFailureMessage ?? 'Could not compile mapping metadata.',
@@ -223,33 +220,6 @@ final readonly class ObjectMapper implements WarmableObjectMapperInterface
         ksort($graph);
 
         return $graph;
-    }
-
-    /**
-     * Extracts a cycle only from the factory's exact, trusted nested-rule diagnostic.
-     *
-     * @return null|list<string>
-     */
-    private function trustedMetadataCycle(string $message): ?array
-    {
-        $className = '[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*(?:\\\[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*)*';
-        $pair      = sprintf('%1$s->%1$s', $className);
-        $pattern   = sprintf(
-            '~\ACannot compile mapping %1$s -> %1$s for parameter \$[A-Za-z_][A-Za-z0-9_]*: Configured (?:nested|collection) mapping: mapping dependency cycle detected: (?<cycle>%2$s(?: -> %2$s)+)\.\z~D',
-            $className,
-            $pair,
-        );
-
-        if (1 !== preg_match($pattern, $message, $matches)) {
-            return null;
-        }
-
-        $cycle = explode(' -> ', $matches['cycle']);
-        if (3 > count($cycle) || $cycle[0] !== $cycle[array_key_last($cycle)]) {
-            return null;
-        }
-
-        return $this->canonicalCycle($cycle);
     }
 
     /**

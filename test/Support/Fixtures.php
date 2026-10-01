@@ -1019,6 +1019,26 @@ final class IndirectCycleDtoC
     public function __construct(public IndirectCycleDtoA $child) {}
 }
 
+final class TwoCycleSourceA
+{
+    public function __construct(public TwoCycleSourceB $child) {}
+}
+
+final class TwoCycleSourceB
+{
+    public function __construct(public TwoCycleSourceA $child) {}
+}
+
+final class TwoCycleDtoA
+{
+    public function __construct(public TwoCycleDtoB $child) {}
+}
+
+final class TwoCycleDtoB
+{
+    public function __construct(public TwoCycleDtoA $child) {}
+}
+
 final class ByReferenceTargetSource
 {
     public int $value = 1;

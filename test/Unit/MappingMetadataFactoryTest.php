@@ -59,6 +59,12 @@ use Sirix\ObjectMapperTest\Support\HookValueTarget;
 use Sirix\ObjectMapperTest\Support\IdTarget;
 use Sirix\ObjectMapperTest\Support\IncompatibleProfileSource;
 use Sirix\ObjectMapperTest\Support\IncompatibleTransformer;
+use Sirix\ObjectMapperTest\Support\IndirectCycleDtoA;
+use Sirix\ObjectMapperTest\Support\IndirectCycleDtoB;
+use Sirix\ObjectMapperTest\Support\IndirectCycleDtoC;
+use Sirix\ObjectMapperTest\Support\IndirectCycleSourceA;
+use Sirix\ObjectMapperTest\Support\IndirectCycleSourceB;
+use Sirix\ObjectMapperTest\Support\IndirectCycleSourceC;
 use Sirix\ObjectMapperTest\Support\InheritedCustomChildMapper;
 use Sirix\ObjectMapperTest\Support\InheritedDateTimeTransformer;
 use Sirix\ObjectMapperTest\Support\InheritedSource;
@@ -95,12 +101,18 @@ use Sirix\ObjectMapperTest\Support\ReleaseCollectionSource;
 use Sirix\ObjectMapperTest\Support\ReleaseDto;
 use Sirix\ObjectMapperTest\Support\RulePrecedenceSource;
 use Sirix\ObjectMapperTest\Support\SameNamedConstantSource;
+use Sirix\ObjectMapperTest\Support\SelfCycleDto;
+use Sirix\ObjectMapperTest\Support\SelfCycleSource;
 use Sirix\ObjectMapperTest\Support\StaticGetterSource;
 use Sirix\ObjectMapperTest\Support\StaticGetterTarget;
 use Sirix\ObjectMapperTest\Support\StaticTransformTransformer;
 use Sirix\ObjectMapperTest\Support\StringTarget;
 use Sirix\ObjectMapperTest\Support\TokenHolderDto;
 use Sirix\ObjectMapperTest\Support\TokenHolderSource;
+use Sirix\ObjectMapperTest\Support\TwoCycleDtoA;
+use Sirix\ObjectMapperTest\Support\TwoCycleDtoB;
+use Sirix\ObjectMapperTest\Support\TwoCycleSourceA;
+use Sirix\ObjectMapperTest\Support\TwoCycleSourceB;
 use Sirix\ObjectMapperTest\Support\UnionConstantTarget;
 use Sirix\ObjectMapperTest\Support\UnionTypedTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\UntypedConstantTarget;
@@ -121,6 +133,7 @@ use Sirix\ObjectMapperTest\Support\WrongTypedTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\ZeroArgumentTransformTransformer;
 
 use function array_map;
+use function count;
 use function hash;
 use function hash_file;
 use function json_encode;
@@ -310,6 +323,69 @@ final class MappingMetadataFactoryTest extends TestCase
     {
         $this->assertCompilationFails(DefaultSource::class, MissingTarget::class, 'No safe readable source member');
         $this->assertCompilationFails(PrivateSource::class, IdTarget::class, 'No safe readable source member');
+    }
+
+    public function testItExposesOnlyTrustedCompilationCycles(): void
+    {
+        $self = new MappingDefinition(SelfCycleSource::class, SelfCycleDto::class, [
+            'child' => MapRule::from('child')->nested(SelfCycleDto::class),
+        ]);
+        $twoA = new MappingDefinition(TwoCycleSourceA::class, TwoCycleDtoA::class, [
+            'child' => MapRule::from('child')->nested(TwoCycleDtoB::class),
+        ]);
+        $twoB = new MappingDefinition(TwoCycleSourceB::class, TwoCycleDtoB::class, [
+            'child' => MapRule::from('child')->nested(TwoCycleDtoA::class),
+        ]);
+        $threeA = new MappingDefinition(IndirectCycleSourceA::class, IndirectCycleDtoA::class, [
+            'child' => MapRule::from('child')->nested(IndirectCycleDtoB::class),
+        ]);
+        $threeB = new MappingDefinition(IndirectCycleSourceB::class, IndirectCycleDtoB::class, [
+            'child' => MapRule::from('child')->nested(IndirectCycleDtoC::class),
+        ]);
+        $threeC = new MappingDefinition(IndirectCycleSourceC::class, IndirectCycleDtoC::class, [
+            'child' => MapRule::from('child')->nested(IndirectCycleDtoA::class),
+        ]);
+
+        $cycles = [
+            'self'  => [[$self], $self->key()],
+            'two'   => [[$twoA, $twoB], $twoA->key()],
+            'three' => [[$threeA, $threeB, $threeC], $threeA->key()],
+        ];
+
+        foreach ($cycles as $label => [$definitions, $rootKey]) {
+            $factory = new MappingMetadataFactory(mappingRegistry: new MappingRegistry($definitions));
+
+            try {
+                $factory->create($definitions[0]);
+                self::fail('Expected a dependency cycle for ' . $label . '.');
+            } catch (MappingCompilationFailed $exception) {
+                $cycle = $factory->trustedCompilationFailureCycle($exception);
+                self::assertIsArray($cycle, 'Missing structured cycle for ' . $label);
+                self::assertGreaterThanOrEqual(2, count($cycle));
+                self::assertSame($cycle[0], $cycle[count($cycle) - 1]);
+                self::assertContains($rootKey, $cycle);
+                self::assertNotNull($factory->trustedCompilationFailureMessage($exception));
+            }
+        }
+    }
+
+    public function testItDoesNotTrustLookalikeCycleFailures(): void
+    {
+        $mappingMetadataFactory = new MappingMetadataFactory(mappingRegistry: new MappingRegistry([
+            new MappingDefinition(DefaultSource::class, MissingTarget::class),
+        ]));
+
+        try {
+            $mappingMetadataFactory->create(new MappingDefinition(DefaultSource::class, MissingTarget::class));
+            self::fail('Expected the invalid mapping to fail.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertNull($mappingMetadataFactory->trustedCompilationFailureCycle($exception));
+            self::assertNotNull($mappingMetadataFactory->trustedCompilationFailureMessage($exception));
+        }
+
+        $mappingCompilationFailed = new MappingCompilationFailed('Cannot compile mapping A -> B for parameter $child: mapping dependency cycle detected: A -> B -> A.');
+        self::assertNull($mappingMetadataFactory->trustedCompilationFailureCycle($mappingCompilationFailed));
+        self::assertNull($mappingMetadataFactory->trustedCompilationFailureMessage($mappingCompilationFailed));
     }
 
     #[RequiresPhp('>= 8.4')]
