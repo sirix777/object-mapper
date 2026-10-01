@@ -7,6 +7,7 @@ namespace Sirix\ObjectMapperTest\Unit;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RequiresPhp;
 use PHPUnit\Framework\TestCase;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
@@ -54,6 +55,7 @@ use Sirix\ObjectMapperTest\Support\DefaultTarget;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodSource;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodTarget;
 use Sirix\ObjectMapperTest\Support\GetterSource;
+use Sirix\ObjectMapperTest\Support\HookValueTarget;
 use Sirix\ObjectMapperTest\Support\IdTarget;
 use Sirix\ObjectMapperTest\Support\IncompatibleProfileSource;
 use Sirix\ObjectMapperTest\Support\IncompatibleTransformer;
@@ -102,6 +104,7 @@ use Sirix\ObjectMapperTest\Support\TokenHolderSource;
 use Sirix\ObjectMapperTest\Support\UnionConstantTarget;
 use Sirix\ObjectMapperTest\Support\UnionTypedTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\UntypedConstantTarget;
+use Sirix\ObjectMapperTest\Support\UntypedExtraSource;
 use Sirix\ObjectMapperTest\Support\UntypedParameterTransformTransformer;
 use Sirix\ObjectMapperTest\Support\UntypedReturnTransformTransformer;
 use Sirix\ObjectMapperTest\Support\UntypedTokenHolderSource;
@@ -110,6 +113,8 @@ use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
 use Sirix\ObjectMapperTest\Support\VariadicConstantTarget;
 use Sirix\ObjectMapperTest\Support\VariadicProfileTarget;
 use Sirix\ObjectMapperTest\Support\VariadicTransformTransformer;
+use Sirix\ObjectMapperTest\Support\VirtualSetOnlySource;
+use Sirix\ObjectMapperTest\Support\VirtualSetOnlyWithGetterSource;
 use Sirix\ObjectMapperTest\Support\VoidTransformTransformer;
 use Sirix\ObjectMapperTest\Support\WrongTypedTokenHolderSource;
 
@@ -307,6 +312,54 @@ final class MappingMetadataFactoryTest extends TestCase
         $this->assertCompilationFails(PrivateSource::class, IdTarget::class, 'No safe readable source member');
     }
 
+    #[RequiresPhp('>= 8.4')]
+    public function testItRejectsVirtualSetOnlySourceProperties(): void
+    {
+        try {
+            $this->mappingMetadataFactory->create(new MappingDefinition(VirtualSetOnlySource::class, HookValueTarget::class));
+            self::fail('Expected the write-only virtual property to be rejected.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString('$value', $exception->getMessage());
+        }
+
+        try {
+            $this->mappingMetadataFactory->create(new MappingDefinition(VirtualSetOnlySource::class, HookValueTarget::class, [
+                'value' => MapRule::from('value'),
+            ]));
+            self::fail('Expected the explicit write-only property selector to be rejected.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString('Configured property selector $value', $exception->getMessage());
+            self::assertStringContainsString('readable', $exception->getMessage());
+        }
+    }
+
+    #[RequiresPhp('>= 8.4')]
+    public function testItFallsBackToGetterWhenConventionalPropertyIsUnreadable(): void
+    {
+        $mappingMetadata = $this->mappingMetadataFactory->create(new MappingDefinition(
+            VirtualSetOnlyWithGetterSource::class,
+            HookValueTarget::class,
+        ));
+
+        $sourceMember = $mappingMetadata->parameters[0]->sourceMember;
+        self::assertInstanceOf(SourceMember::class, $sourceMember);
+        self::assertSame('method', $sourceMember->kind);
+        self::assertSame('getValue', $sourceMember->name);
+
+        try {
+            $this->mappingMetadataFactory->create(new MappingDefinition(
+                VirtualSetOnlyWithGetterSource::class,
+                HookValueTarget::class,
+                [
+                    'value' => MapRule::from('value'),
+                ],
+            ));
+            self::fail('Expected an explicit write-only property selector to fail without fallback.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString('readable', $exception->getMessage());
+        }
+    }
+
     public function testItRejectsNullableAndMixedValuesForNarrowerTargets(): void
     {
         $this->assertCompilationFails(NullableSource::class, NonNullableNameTarget::class);
@@ -327,6 +380,24 @@ final class MappingMetadataFactoryTest extends TestCase
             NameTarget::class,
             'public source property $id is not mapped',
         );
+    }
+
+    public function testItStillRejectsUnmappedUntypedPublicProperties(): void
+    {
+        $this->assertCompilationFails(
+            UntypedExtraSource::class,
+            IdTarget::class,
+            'public source property $extra is not mapped',
+        );
+
+        $mappingMetadata = $this->mappingMetadataFactory->create(new MappingDefinition(
+            UntypedExtraSource::class,
+            IdTarget::class,
+            [],
+            ['extra'],
+        ));
+
+        self::assertSame('id', $mappingMetadata->parameters[0]->sourceMember?->name);
     }
 
     public function testItResolvesStaticGetterTypesAgainstTheRegisteredSourceClass(): void

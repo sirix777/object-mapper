@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Sirix\ObjectMapper\Metadata;
 
 use LogicException;
+use PropertyHookType;
 use ReflectionClass;
 use ReflectionIntersectionType;
 use ReflectionMethod;
@@ -381,12 +382,13 @@ final class MappingMetadataFactory
         $name = $reflectionParameter->getName();
 
         if ($reflectionClass->hasProperty($name)) {
-            $property = $reflectionClass->getProperty($name);
-            if ($property->isPublic() && ! $property->isStatic() && $property->getType() instanceof ReflectionType) {
+            $property     = $reflectionClass->getProperty($name);
+            $propertyType = $property->getType();
+            if ($this->isReadableSourceProperty($property) && $propertyType instanceof ReflectionType) {
                 return new SourceMember(
                     $name,
                     'property',
-                    $property->getType(),
+                    $propertyType,
                     $property->getDeclaringClass(),
                 );
             }
@@ -423,6 +425,24 @@ final class MappingMetadataFactory
         return null;
     }
 
+    private function isReadableSourceProperty(ReflectionProperty $reflectionProperty): bool
+    {
+        if (! $reflectionProperty->isPublic() || $reflectionProperty->isStatic() || ! $reflectionProperty->getType() instanceof ReflectionType) {
+            return false;
+        }
+
+        return $this->hasAccessiblePropertyRead($reflectionProperty);
+    }
+
+    private function hasAccessiblePropertyRead(ReflectionProperty $reflectionProperty): bool
+    {
+        if (PHP_VERSION_ID < 80400) {
+            return true;
+        }
+
+        return ! $reflectionProperty->isVirtual() || $reflectionProperty->hasHook(PropertyHookType::Get);
+    }
+
     /**
      * @param ReflectionClass<object> $source
      * @param ReflectionClass<object> $target
@@ -445,17 +465,18 @@ final class MappingMetadataFactory
                 ));
             }
 
-            $property = $source->getProperty($selector);
-            if (! $property->isPublic() || $property->isStatic() || ! $property->getType() instanceof ReflectionType) {
+            $property     = $source->getProperty($selector);
+            $propertyType = $property->getType();
+            if (! $this->isReadableSourceProperty($property) || ! $propertyType instanceof ReflectionType) {
                 throw new MappingCompilationFailed($this->message(
                     $source,
                     $target,
                     $reflectionParameter->getName(),
-                    sprintf('Configured property selector $%s must select a public, non-static, typed source property.', $selector),
+                    sprintf('Configured property selector $%s must select a public, non-static, typed source property that is readable.', $selector),
                 ));
             }
 
-            return new SourceMember($selector, 'property', $property->getType(), $property->getDeclaringClass(), 'property_rule');
+            return new SourceMember($selector, 'property', $propertyType, $property->getDeclaringClass(), 'property_rule');
         }
 
         return $this->resolveSelectedMethod($source, $target, $reflectionParameter, $mapRule);
@@ -1157,6 +1178,7 @@ final class MappingMetadataFactory
 
         foreach ($source->getProperties(ReflectionProperty::IS_PUBLIC) as $reflectionProperty) {
             if (! $reflectionProperty->isStatic()
+                && $this->hasAccessiblePropertyRead($reflectionProperty)
                 && ! isset($mappedProperties[$reflectionProperty->getName()])
                 && ! in_array($reflectionProperty->getName(), $ignoredSource, true)) {
                 throw new MappingCompilationFailed(sprintf(

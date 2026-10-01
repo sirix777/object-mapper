@@ -13,6 +13,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or transformer. Previously such parameters were accepted and generated code
   could mutate the source property. Transformer by-reference validation is
   unchanged.
+- On PHP 8.4+, conventional discovery and explicit property selectors now
+  require a readable source property. Write-only virtual hooked properties are
+  rejected during metadata compilation; virtual get/set hooks and backed
+  properties with a set hook stay readable, and convention can still fall back
+  to a getter. PHP 8.2/8.3 behavior is unchanged.
 
 ## [0.9.0] - 2026-09-09
 

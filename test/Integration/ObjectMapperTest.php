@@ -10,6 +10,7 @@ use Fiber;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RequiresPhp;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 use RuntimeException;
@@ -41,6 +42,7 @@ use Sirix\ObjectMapper\Runtime\ObjectMapper;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use Sirix\ObjectMapperTest\Support\AccessToken;
 use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
+use Sirix\ObjectMapperTest\Support\BackedSetOnlySource;
 use Sirix\ObjectMapperTest\Support\ByReferenceRecordingTransformer;
 use Sirix\ObjectMapperTest\Support\ByReferenceRequiredTarget;
 use Sirix\ObjectMapperTest\Support\ByReferenceTargetSource;
@@ -76,6 +78,7 @@ use Sirix\ObjectMapperTest\Support\DirectCycleProxy;
 use Sirix\ObjectMapperTest\Support\DirectCycleProxyRootWithChild;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodSource;
 use Sirix\ObjectMapperTest\Support\ExplicitMethodTarget;
+use Sirix\ObjectMapperTest\Support\HookValueTarget;
 use Sirix\ObjectMapperTest\Support\IdTarget;
 use Sirix\ObjectMapperTest\Support\IndirectCycleDtoA;
 use Sirix\ObjectMapperTest\Support\IndirectCycleDtoB;
@@ -130,6 +133,8 @@ use Sirix\ObjectMapperTest\Support\TokenHolderDto;
 use Sirix\ObjectMapperTest\Support\TokenHolderSource;
 use Sirix\ObjectMapperTest\Support\Uuid;
 use Sirix\ObjectMapperTest\Support\UuidToStringTransformer;
+use Sirix\ObjectMapperTest\Support\VirtualGetOnlySource;
+use Sirix\ObjectMapperTest\Support\VirtualGetSetSource;
 use Sirix\ObjectMapperTest\Support\WrongParentCycleProxy;
 use stdClass;
 
@@ -242,6 +247,30 @@ final class ObjectMapperTest extends TestCase
         self::assertSame(0, $countingValueTransformerRegistry->getCalls);
         self::assertSame(1, $byReferenceTargetSource->value);
         self::assertSame([], glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
+    }
+
+    #[RequiresPhp('>= 8.4')]
+    public function testItMapsReadableHookedProperties(): void
+    {
+        VirtualGetSetSource::$reads  = 0;
+        $objectMapper                = $this->mapper(true, new MappingDefinition(VirtualGetSetSource::class, HookValueTarget::class));
+
+        self::assertSame(3, $objectMapper->map(new VirtualGetSetSource(), HookValueTarget::class)->value);
+        self::assertSame(1, VirtualGetSetSource::$reads);
+
+        $getOnlyMapper = $this->mapper(true, new MappingDefinition(VirtualGetOnlySource::class, HookValueTarget::class));
+
+        self::assertSame(42, $getOnlyMapper->map(new VirtualGetOnlySource(), HookValueTarget::class)->value);
+    }
+
+    #[RequiresPhp('>= 8.4')]
+    public function testItKeepsBackedSetOnlyPropertiesReadable(): void
+    {
+        $mapper                     = $this->mapper(true, new MappingDefinition(BackedSetOnlySource::class, HookValueTarget::class));
+        $backedSetOnlySource        = new BackedSetOnlySource();
+        $backedSetOnlySource->value = 7;
+
+        self::assertSame(7, $mapper->map($backedSetOnlySource, HookValueTarget::class)->value);
     }
 
     public function testItImplementsSeparateMappingAndWarmupContracts(): void

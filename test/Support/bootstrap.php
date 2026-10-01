@@ -9,3 +9,7 @@ require __DIR__ . '/ExternalTransformingParent.php';
 require __DIR__ . '/CycleOrmProxyFixtures.php';
 
 require __DIR__ . '/Fixtures.php';
+
+if (PHP_VERSION_ID >= 80400) {
+    require __DIR__ . '/PropertyHookFixtures.php';
+}

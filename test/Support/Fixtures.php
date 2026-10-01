@@ -1029,6 +1029,14 @@ final readonly class ByReferenceReadonlySource
     public function __construct(public int $value = 1) {}
 }
 
+final class UntypedExtraSource
+{
+    public int $id = 1;
+
+    /** @var mixed */
+    public $extra = 'sensitive';
+}
+
 final readonly class ByReferenceRequiredTarget
 {
     public function __construct(int &$value)
