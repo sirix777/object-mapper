@@ -18,6 +18,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rejected during metadata compilation; virtual get/set hooks and backed
   properties with a set hook stay readable, and convention can still fall back
   to a getter. PHP 8.2/8.3 behavior is unchanged.
+- Conventional mappers now evaluate constructor arguments in constructor order:
+  each source read, transformer, nested and collection operation completes
+  before the next parameter is processed. Nullable members are no longer read
+  ahead of earlier parameters, so callback and failure ordering follows the
+  target constructor parameter order.
+- Generated-mapper cache format changed to `8`. Format-7 files are not reused.
+  Deploy code and registrations, rotate the old owner-only cache, warm the new
+  `0700` cache as its runtime owner before traffic, and restart or reload all
+  long-running workers, including prepared-mapping reuse. Generated files remain
+  `0600`.
 
 ## [0.9.0] - 2026-09-09
 

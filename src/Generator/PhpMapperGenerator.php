@@ -16,12 +16,11 @@ use function implode;
 use function json_encode;
 use function preg_match;
 use function sprintf;
-use function str_replace;
 
 /** @internal */
 final class PhpMapperGenerator
 {
-    private const FORMAT_VERSION = '7';
+    private const FORMAT_VERSION = '8';
 
     public function cacheKey(MappingMetadata $mappingMetadata): string
     {
@@ -35,10 +34,10 @@ final class PhpMapperGenerator
 
     public function generate(MappingMetadata $mappingMetadata, string $cacheKey): string
     {
-        $arguments              = [];
-        $collectionMethods      = [];
-        $statements             = [];
-        $constantValueExporter  = new ConstantValueExporter();
+        $arguments             = [];
+        $collectionMethods     = [];
+        $statements            = [];
+        $constantValueExporter = new ConstantValueExporter();
         foreach ($mappingMetadata->parameters as $index => $parameter) {
             if (null !== $parameter->constant) {
                 $arguments[] = sprintf(
@@ -54,15 +53,16 @@ final class PhpMapperGenerator
                 continue;
             }
 
-            $expression = $parameter->sourceMember->expression('$source');
+            $sourceExpression = $parameter->sourceMember->expression('$source');
             if (null !== $parameter->transformer) {
-                $expression = sprintf(
+                $sourceExpression = sprintf(
                     '$this->transformers->get(%s::class)->transform(%s)',
                     $this->classToken($parameter->transformer->class),
-                    $expression,
+                    $sourceExpression,
                 );
             }
 
+            $argumentVariable = '$argument' . $index;
             if (null !== $parameter->nestedMapping) {
                 $nested           = $parameter->nestedMapping;
                 $dependencySource = $this->classToken($nested->source);
@@ -70,19 +70,27 @@ final class PhpMapperGenerator
                 $sourceMatch      = '\Sirix\ObjectMapper\Definition\SourceMatchMode::' . $nested->sourceMatch->name;
 
                 if ('nested' === $nested->operation) {
-                    $dispatch = sprintf(
-                        '$this->nestedMappings->mapNested(%s, %s::class, %s::class, %s)',
-                        $expression,
-                        $dependencySource,
-                        $dependencyTarget,
-                        $sourceMatch,
-                    );
                     if ($nested->nullable) {
-                        $temporary    = '$nestedValue' . $index;
-                        $statements[] = sprintf('        %s = %s;', $temporary, $expression);
-                        $expression   = sprintf('null === %s ? null : %s', $temporary, str_replace($expression, $temporary, $dispatch));
+                        $sourceVariable = '$sourceValue' . $index;
+                        $statements[]   = sprintf('        %s = %s;', $sourceVariable, $parameter->sourceMember->expression('$source'));
+                        $statements[]   = sprintf(
+                            '        %s = null === %s ? null : $this->nestedMappings->mapNested(%s, %s::class, %s::class, %s);',
+                            $argumentVariable,
+                            $sourceVariable,
+                            $sourceVariable,
+                            $dependencySource,
+                            $dependencyTarget,
+                            $sourceMatch,
+                        );
                     } else {
-                        $expression = $dispatch;
+                        $statements[] = sprintf(
+                            '        %s = $this->nestedMappings->mapNested(%s, %s::class, %s::class, %s);',
+                            $argumentVariable,
+                            $sourceExpression,
+                            $dependencySource,
+                            $dependencyTarget,
+                            $sourceMatch,
+                        );
                     }
                 } else {
                     $method              = 'mapCollectionForParameter' . $index;
@@ -96,21 +104,23 @@ final class PhpMapperGenerator
                         $dependencyTarget,
                         $sourceMatch,
                     );
-                    $mapped     = sprintf('$this->%s(%s)', $method, $expression);
+
                     if ($nested->nullable) {
-                        $temporary    = '$collectionValue' . $index;
-                        $statements[] = sprintf('        %s = %s;', $temporary, $expression);
-                        $expression   = sprintf('null === %s ? null : %s', $temporary, str_replace($expression, $temporary, $mapped));
+                        $sourceVariable = '$sourceValue' . $index;
+                        $statements[]   = sprintf('        %s = %s;', $sourceVariable, $parameter->sourceMember->expression('$source'));
+                        $statements[]   = sprintf('        %s = null === %s ? null : $this->%s(%s);', $argumentVariable, $sourceVariable, $method, $sourceVariable);
                     } else {
-                        $expression = $mapped;
+                        $statements[] = sprintf('        %s = $this->%s(%s);', $argumentVariable, $method, $sourceExpression);
                     }
                 }
+            } else {
+                $statements[] = sprintf('        %s = %s;', $argumentVariable, $sourceExpression);
             }
 
             $arguments[] = sprintf(
                 '            %s: %s,',
                 $parameter->name,
-                $expression,
+                $argumentVariable,
             );
         }
 

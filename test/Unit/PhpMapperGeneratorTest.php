@@ -132,7 +132,7 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertSame($generated, $phpMapperGenerator->generate($mappingMetadata, $key));
     }
 
-    public function testItsCacheKeyDistinguishesConstantTypesAndInvalidatesFormatSix(): void
+    public function testItsCacheKeyDistinguishesConstantTypesAndInvalidatesLegacyFormats(): void
     {
         $mappingMetadataFactory   = new MappingMetadataFactory();
         $phpMapperGenerator       = new PhpMapperGenerator();
@@ -149,15 +149,18 @@ final class PhpMapperGeneratorTest extends TestCase
         }
 
         self::assertCount(4, array_unique($keys));
-        $mappingMetadata            = $mappingMetadataFactory->create(new MappingDefinition(ConventionalSource::class, ConventionalTarget::class));
-        $reflectionMethod           = new ReflectionMethod(PhpMapperGenerator::class, 'normalizedMetadata');
-        $formatSix                  = $reflectionMethod->invoke($phpMapperGenerator, $mappingMetadata);
-        $formatSix['format']        = '6';
+        $mappingMetadata         = $mappingMetadataFactory->create(new MappingDefinition(ConventionalSource::class, ConventionalTarget::class));
+        $reflectionMethod        = new ReflectionMethod(PhpMapperGenerator::class, 'normalizedMetadata');
+        $currentKey              = $phpMapperGenerator->cacheKey($mappingMetadata);
+        foreach (['6', '7'] as $legacyFormat) {
+            $legacyMetadata           = $reflectionMethod->invoke($phpMapperGenerator, $mappingMetadata);
+            $legacyMetadata['format'] = $legacyFormat;
 
-        self::assertNotSame(
-            hash('sha256', json_encode($formatSix, JSON_THROW_ON_ERROR)),
-            $phpMapperGenerator->cacheKey($mappingMetadata),
-        );
+            self::assertNotSame(
+                hash('sha256', json_encode($legacyMetadata, JSON_THROW_ON_ERROR)),
+                $currentKey,
+            );
+        }
     }
 
     public function testItsCacheKeySupportsInvalidUtfEightConstantStrings(): void
@@ -192,7 +195,8 @@ final class PhpMapperGeneratorTest extends TestCase
         self::assertSame($key, $phpMapperGenerator->cacheKey($mappingMetadata));
         self::assertSame($phpMapperGenerator->generate($mappingMetadata, $key), $phpMapperGenerator->generate($mappingMetadata, $key));
         self::assertStringContainsString('new \Sirix\ObjectMapperTest\Support\ConventionalTarget(', $phpMapperGenerator->generate($mappingMetadata, $key));
-        self::assertStringContainsString('id: $source->id,', $phpMapperGenerator->generate($mappingMetadata, $key));
+        self::assertStringContainsString('$argument0 = $source->id;', $phpMapperGenerator->generate($mappingMetadata, $key));
+        self::assertStringContainsString('id: $argument0,', $phpMapperGenerator->generate($mappingMetadata, $key));
         self::assertStringContainsString('SourceMatcher::matches($source, \Sirix\ObjectMapperTest\Support\ConventionalSource::class, \Sirix\ObjectMapper\Definition\SourceMatchMode::Exact)', $phpMapperGenerator->generate($mappingMetadata, $key));
     }
 
@@ -403,8 +407,8 @@ final class PhpMapperGeneratorTest extends TestCase
         $mappingMetadata          = $mappingMetadataFactory->create($nullable);
 
         $generated = $phpMapperGenerator->generate($mappingMetadata, $phpMapperGenerator->cacheKey($mappingMetadata));
-        self::assertStringContainsString('$nestedValue0 = $source->token;', $generated);
-        self::assertStringContainsString('null === $nestedValue0 ? null : $this->nestedMappings->mapNested($nestedValue0', $generated);
+        self::assertStringContainsString('$sourceValue0 = $source->token;', $generated);
+        self::assertStringContainsString('null === $sourceValue0 ? null : $this->nestedMappings->mapNested($sourceValue0', $generated);
         self::assertNotSame($phpMapperGenerator->cacheKey($mappingMetadataFactory->create($required)), $phpMapperGenerator->cacheKey($mappingMetadata));
     }
 

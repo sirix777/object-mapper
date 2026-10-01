@@ -1037,6 +1037,76 @@ final class UntypedExtraSource
     public $extra = 'sensitive';
 }
 
+final class ConstructorOrderSource
+{
+    /** @var list<string> */
+    private array $events = [];
+
+    /** @param null|list<Release> $items */
+    public function __construct(private readonly ?Release $release = null, private readonly ?array $items = null, private readonly bool $throwFirst = false) {}
+
+    public function getFirst(): int
+    {
+        $this->events[] = 'first';
+        if ($this->throwFirst) {
+            throw new RuntimeException('constructor-order-first-failure');
+        }
+
+        return 1;
+    }
+
+    public function getChild(): ?Release
+    {
+        $this->events[] = 'child';
+
+        return $this->release;
+    }
+
+    /** @return null|list<Release> */
+    public function getItems(): ?array
+    {
+        $this->events[] = 'items';
+
+        return $this->items;
+    }
+
+    public function getLast(): string
+    {
+        $this->events[] = 'last';
+
+        return 'last';
+    }
+
+    /** @return list<string> */
+    public function events(): array
+    {
+        return $this->events;
+    }
+}
+
+final class ConstructorOrderTarget
+{
+    public static int $constructions = 0;
+
+    /** @param null|list<ReleaseDto> $items */
+    public function __construct(
+        public int $first,
+        public ?ReleaseDto $child,
+        public ?array $items,
+        public string $last,
+    ) {
+        ++self::$constructions;
+    }
+}
+
+final class OrderFailingTransformer implements ValueTransformerInterface
+{
+    public function transform(int $value): int
+    {
+        throw new RuntimeException('constructor-order-transformer-failure');
+    }
+}
+
 final readonly class ByReferenceRequiredTarget
 {
     public function __construct(int &$value)

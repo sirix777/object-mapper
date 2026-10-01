@@ -96,7 +96,7 @@ avoiding N+1 queries before mapping.
 
 The source-match choice participates in generated-mapper cache identity.
 Release `0.9.0` uses format `7`; generated files remain
-owner-only (`0600`). See [deployment instructions](#upgrading-generated-cache-to-format-7).
+owner-only (`0600`). See [deployment instructions](#upgrading-generated-cache-to-format-8).
 
 ## Customize a conventional mapping
 
@@ -591,6 +591,19 @@ warmup successfully before requests reach the release.
 Restart or reload every long-running PHP worker so it loads the new runtime
 and generated mappers; this is required for workers using prepared-mapping
 reuse too. Do not mix an old runtime with newly generated format-7 code.
+
+## Upgrading generated cache to format 8
+
+The next release changes generated-mapper cache format from `7` to `8`.
+Format-7 files are not reused. Deploy the application code and trusted
+registrations, rotate the previous cache directory, and warm the new owner-only
+(`0700`) cache as the runtime owner before serving traffic. Generated files
+remain `0600`. With `generateOnDemand: false`, deployment must complete warmup
+successfully before requests reach the release.
+
+Restart or reload every long-running PHP worker so it loads the new runtime and
+generated mappers; this is required for workers using prepared-mapping reuse
+too. Do not mix an older runtime with newly generated format-8 code.
 
 ## Upgrading to 0.9.0
 

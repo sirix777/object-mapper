@@ -13,6 +13,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RequiresPhp;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
+use ReflectionMethod;
 use RuntimeException;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
@@ -57,6 +58,8 @@ use Sirix\ObjectMapperTest\Support\CallbackReleaseProvider;
 use Sirix\ObjectMapperTest\Support\CollectionExecutionTrace;
 use Sirix\ObjectMapperTest\Support\ConstantSource;
 use Sirix\ObjectMapperTest\Support\ConstantTarget;
+use Sirix\ObjectMapperTest\Support\ConstructorOrderSource;
+use Sirix\ObjectMapperTest\Support\ConstructorOrderTarget;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
 use Sirix\ObjectMapperTest\Support\CustomChildDto;
@@ -102,6 +105,7 @@ use Sirix\ObjectMapperTest\Support\ObservedRelease;
 use Sirix\ObjectMapperTest\Support\ObservedReleaseCollectionsDto;
 use Sirix\ObjectMapperTest\Support\ObservedReleaseCollectionsSource;
 use Sirix\ObjectMapperTest\Support\ObservedReleaseTransformer;
+use Sirix\ObjectMapperTest\Support\OrderFailingTransformer;
 use Sirix\ObjectMapperTest\Support\PrivateSource;
 use Sirix\ObjectMapperTest\Support\ProfileSource;
 use Sirix\ObjectMapperTest\Support\ProfileTarget;
@@ -157,6 +161,7 @@ use function hash;
 use function implode;
 use function in_array;
 use function is_dir;
+use function json_encode;
 use function mkdir;
 use function random_bytes;
 use function rmdir;
@@ -271,6 +276,96 @@ final class ObjectMapperTest extends TestCase
         $backedSetOnlySource->value = 7;
 
         self::assertSame(7, $mapper->map($backedSetOnlySource, HookValueTarget::class)->value);
+    }
+
+    public function testItEvaluatesArgumentsInConstructorOrder(): void
+    {
+        foreach ([[new Release('1'), [new Release('2')]], [null, []]] as [$child, $items]) {
+            ConstructorOrderTarget::$constructions = 0;
+            $source                                = new ConstructorOrderSource($child, $items);
+
+            $target = $this->orderMapper()->map($source, ConstructorOrderTarget::class);
+
+            self::assertSame(['first', 'child', 'items', 'last'], $source->events());
+            self::assertSame(1, ConstructorOrderTarget::$constructions);
+            self::assertSame(1, $target->first);
+            self::assertSame('last', $target->last);
+        }
+    }
+
+    public function testItDoesNotReadLaterNullableMembersAfterAnEarlierFailure(): void
+    {
+        ConstructorOrderTarget::$constructions = 0;
+        $throwingSource                        = new ConstructorOrderSource(new Release('1'), [new Release('2')], throwFirst: true);
+
+        try {
+            $this->orderMapper()->map($throwingSource, ConstructorOrderTarget::class);
+            self::fail('Expected the first getter to fail.');
+        } catch (MappingExecutionFailed) {
+        }
+
+        self::assertSame(['first'], $throwingSource->events());
+        self::assertSame(0, ConstructorOrderTarget::$constructions);
+
+        ConstructorOrderTarget::$constructions = 0;
+        $transformerSource                     = new ConstructorOrderSource(new Release('1'), [new Release('2')]);
+        $objectMapper                          = $this->mapperWithTransformers(
+            true,
+            new ValueTransformerRegistry([new OrderFailingTransformer()]),
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new MappingDefinition(ConstructorOrderSource::class, ConstructorOrderTarget::class, [
+                'first' => MapRule::fromGetter('getFirst')->through(OrderFailingTransformer::class),
+                'child' => MapRule::fromGetter('getChild')->nested(ReleaseDto::class),
+                'items' => MapRule::fromGetter('getItems')->collection(Release::class, ReleaseDto::class),
+            ]),
+        );
+
+        try {
+            $objectMapper->map($transformerSource, ConstructorOrderTarget::class);
+            self::fail('Expected the transformer to fail.');
+        } catch (MappingExecutionFailed) {
+        }
+
+        self::assertSame(['first'], $transformerSource->events());
+        self::assertSame(0, ConstructorOrderTarget::$constructions);
+    }
+
+    public function testFormatSevenCacheDoesNotSatisfyFormatEightProductionLookup(): void
+    {
+        $mappingDefinition        = new MappingDefinition(ConventionalSource::class, ConventionalTarget::class);
+        $phpMapperGenerator       = new PhpMapperGenerator();
+        $mappingMetadata          = (new MappingMetadataFactory())->create($mappingDefinition);
+        $reflectionMethod         = new ReflectionMethod(PhpMapperGenerator::class, 'normalizedMetadata');
+        $legacyMetadata           = $reflectionMethod->invoke($phpMapperGenerator, $mappingMetadata);
+        $legacyMetadata['format'] = '7';
+        $legacyKey                = hash('sha256', json_encode($legacyMetadata, JSON_THROW_ON_ERROR));
+
+        if (! is_dir($this->cacheDirectory)) {
+            mkdir($this->cacheDirectory, 0o700, true);
+        }
+
+        $legacyPath = $this->cacheDirectory . '/Mapper_' . $legacyKey . '.php';
+        file_put_contents($legacyPath, '<?php // legacy format seven cache');
+        chmod($legacyPath, 0o600);
+
+        $formatEightKey = $phpMapperGenerator->cacheKey($mappingMetadata);
+        file_put_contents($this->cacheDirectory . '/.Mapper_' . $formatEightKey . '.lock', '');
+
+        $objectMapper = $this->mapper(false, $mappingDefinition);
+
+        try {
+            $objectMapper->map(new ConventionalSource(7, 'Ada', true), ConventionalTarget::class);
+            self::fail('Expected a format-8 production cache miss.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString('Warm the cache before production use.', $exception->getMessage());
+        }
+
+        self::assertSame('<?php // legacy format seven cache', file_get_contents($legacyPath));
+
+        $warmMapper = $this->mapper(true, $mappingDefinition);
+
+        self::assertSame(7, $warmMapper->map(new ConventionalSource(7, 'Ada', true), ConventionalTarget::class)->id);
+        self::assertCount(2, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
     }
 
     public function testItImplementsSeparateMappingAndWarmupContracts(): void
@@ -774,12 +869,12 @@ final class ObjectMapperTest extends TestCase
         self::assertCount(2, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
     }
 
-    public function testItRetainsFormatSixAndCanonicalDefinitionCacheBehavior(): void
+    public function testItRetainsCanonicalDefinitionCacheBehavior(): void
     {
         $mappingDefinition = new MappingDefinition(DefaultSource::class, DefaultTarget::class);
         $mapper            = $this->mapper(false, $mappingDefinition);
 
-        self::assertSame('7', (new ReflectionClass(PhpMapperGenerator::class))->getConstant('FORMAT_VERSION'));
+        self::assertSame('8', (new ReflectionClass(PhpMapperGenerator::class))->getConstant('FORMAT_VERSION'));
         self::assertSame(DefaultSource::class, $mappingDefinition->source());
         self::assertSame([$mappingDefinition->key()], $mapper->warmup());
         self::assertSame('default', $mapper->map(new DefaultSource(1), DefaultTarget::class)->label);
@@ -1380,7 +1475,7 @@ final class ObjectMapperTest extends TestCase
                 ]),
             );
             $items          = [];
-            $expectedEvents = ['first', 'second'];
+            $expectedEvents = ['first'];
             foreach ([0, 1, 2] as $position) {
                 $items[$position + 10] = $position === $invalidPosition ? null : new ObservedRelease((string) $position, $trace);
                 if ($position < $invalidPosition) {
@@ -1432,7 +1527,7 @@ final class ObjectMapperTest extends TestCase
         ), ObservedReleaseCollectionsDto::class);
         self::assertEquals([new ReleaseDto('a')], $result->first);
         self::assertEquals([new ReleaseDto('b')], $result->second);
-        self::assertSame(['first', 'second', 'get:a', 'transform:a', 'get:b', 'transform:b'], $collectionExecutionTrace->events);
+        self::assertSame(['first', 'get:a', 'transform:a', 'second', 'get:b', 'transform:b'], $collectionExecutionTrace->events);
 
         $collectionExecutionTrace->events = [];
 
@@ -1448,7 +1543,7 @@ final class ObjectMapperTest extends TestCase
         } catch (MappingExecutionFailed $exception) {
             self::assertStringContainsString('parameter "second"', $exception->getMessage());
             self::assertStringNotContainsString('sensitive-key', $exception->getMessage());
-            self::assertSame(['first', 'second', 'get:a', 'transform:a'], $collectionExecutionTrace->events);
+            self::assertSame(['first', 'get:a', 'transform:a', 'second'], $collectionExecutionTrace->events);
         }
     }
 
@@ -1600,7 +1695,7 @@ final class ObjectMapperTest extends TestCase
             self::assertStringNotContainsString('sensitive callback details', $exception->getMessage());
             self::assertNull($exception->getPrevious());
         }
-        self::assertSame(['first', 'second', 'attempt'], $collectionExecutionTrace->events);
+        self::assertSame(['first', 'attempt'], $collectionExecutionTrace->events);
         if (function_exists('xdebug_info') && in_array('develop', xdebug_info('mode'), true)) {
             self::markTestSkipped('Xdebug retains exception arguments; run XDEBUG_MODE=off to verify runtime retention.');
         }
@@ -3477,7 +3572,7 @@ final class ObjectMapperTest extends TestCase
             $mapper->map($observedReleaseCollectionsSource, ObservedReleaseCollectionsDto::class);
             self::fail('Expected the collection leaf to sanitize the unconsumed parent token.');
         } catch (MappingExecutionFailed $exception) {
-            self::assertSame(['first', 'captured', 'second', 'replayed'], $collectionExecutionTrace->events);
+            self::assertSame(['first', 'captured', 'replayed'], $collectionExecutionTrace->events);
             self::assertSame('Could not execute mapping ' . ObservedReleaseCollectionsSource::class . '->' . ObservedReleaseCollectionsDto::class . '.', $exception->getMessage());
             self::assertNull($exception->getPrevious());
         }
@@ -3679,6 +3774,18 @@ final class ObjectMapperTest extends TestCase
                 $generateOnDemand,
                 $mappingRegistry,
             ),
+        );
+    }
+
+    private function orderMapper(): ObjectMapper
+    {
+        return $this->mapper(
+            true,
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new MappingDefinition(ConstructorOrderSource::class, ConstructorOrderTarget::class, [
+                'child' => MapRule::fromGetter('getChild')->nested(ReleaseDto::class),
+                'items' => MapRule::fromGetter('getItems')->collection(Release::class, ReleaseDto::class),
+            ]),
         );
     }
 
