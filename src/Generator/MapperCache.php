@@ -818,6 +818,10 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
                 throw new MappingCompilationFailed(sprintf('Could not lock mapper cache for %s.', $mappingDefinition->key()));
             }
 
+            if (is_link($path)) {
+                throw new MappingCompilationFailed(sprintf('Generated mapper file %s must not be a symbolic link.', $path));
+            }
+
             if (is_file($path)) {
                 return $this->remember(
                     $key,
