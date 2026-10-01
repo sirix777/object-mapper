@@ -19,6 +19,7 @@ The package requires PHP 8.2 or later and has no production dependencies.
 
 ```php
 use Sirix\ObjectMapper\Contract\ObjectMapperInterface;
+use Sirix\ObjectMapper\Contract\WarmableObjectMapperInterface;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Generator\MapperCache;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
@@ -27,6 +28,7 @@ use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapper\Runtime\ObjectMapper;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 
+// One shared registry and one shared transformer registry for the whole app.
 $registry = new MappingRegistry([
     new MappingDefinition(UserResult::class, UserDto::class),
 ]);
@@ -36,26 +38,31 @@ $transformers = new ValueTransformerRegistry([
     new DateTimeToAtom(),
 ]);
 
-/** @var ObjectMapperInterface $mapper */
-$mapper = new ObjectMapper(
-    $registry,
-    new MapperCache(
-        new MappingMetadataFactory($transformers, mappingRegistry: $registry),
-        new PhpMapperGenerator(),
-        __DIR__ . '/var/cache/object-mapper',
-        generateOnDemand: false,
-        valueTransformerRegistry: $transformers,
-        mappingRegistry: $registry,
-    ),
+$cache = new MapperCache(
+    new MappingMetadataFactory($transformers, mappingRegistry: $registry),
+    new PhpMapperGenerator(),
+    __DIR__ . '/var/cache/object-mapper',
+    $transformers,
+    generateOnDemand: false,
+    mappingRegistry: $registry,
+    reusePreparedMappings: true,
 );
+
+/** @var ObjectMapperInterface&WarmableObjectMapperInterface $mapper */
+$mapper = new ObjectMapper($registry, $cache);
+
+// Warm once during deployment or worker boot, before the process serves traffic.
+$mapper->warmup();
 
 /** @var UserDto $dto */
 $dto = $mapper->map($result, UserDto::class);
 ```
 
-Register a pair once in application wiring. Mapping always uses the exact
+Register a pair once in application wiring and pass the same registry and
+transformer registry to every mapper component. Mapping always uses the exact
 runtime source class and requested target class; an unregistered pair raises
-`MappingNotRegistered`.
+`MappingNotRegistered`. See [Production and operations](#production-and-operations)
+for the full deployment, cache, and worker lifecycle.
 
 ## Optional Cycle ORM direct-proxy matching
 
@@ -95,8 +102,8 @@ Cycle lazy loading, so applications remain responsible for query preloading and
 avoiding N+1 queries before mapping.
 
 The source-match choice participates in generated-mapper cache identity.
-Release `0.9.0` uses format `7`; generated files remain
-owner-only (`0600`). See [deployment instructions](#upgrading-generated-cache-to-format-8).
+Current generated files use format `8` and remain owner-only (`0600`). See
+[Production and operations](#production-and-operations).
 
 ## Customize a conventional mapping
 
@@ -300,56 +307,20 @@ opaque closed configuration value, never a class name or request-controlled
 service key. The core neither instantiates it nor accesses a container. Provider
 resolution happens once for each actual custom-mapping invocation; a resolved
 mapper is not retained in mapping definitions, metadata, or generated files.
+`warmup()` neither resolves nor executes a provider, so verify provider wiring
+in application startup or a smoke test rather than relying on warmup.
 
 The application owns mapper service scope, recursive mapper use, I/O, and
 policy. Keep authorization, decryption, and redaction explicit in the custom
 mapper, and never derive mapper identifiers from request data. Provider and
 mapper failures are intentionally reported only as a failed mapping pair.
 
-## Cache warmup
+## Production and operations
 
-Use a non-public **owner-only (`0700`)** cache directory. The deployment user
-must warm it, and the runtime user must be the same owner so it can read the
-generated owner-only (`0600`) files. Production keeps `generateOnDemand`
-disabled and explicitly warms the registered mappings before traffic reaches
-the release:
-
-```php
-use Sirix\ObjectMapper\Contract\WarmableObjectMapperInterface;
-
-/** @var WarmableObjectMapperInterface $warmableMapper */
-$warmableMapper = $mapper;
-$warmableMapper->warmup();
-```
-
-`ObjectMapperInterface` is mapping-only so application-owned implementations
-remain compatible. Request `WarmableObjectMapperInterface` only from deployment
-or cache-warmup wiring that requires `warmup()`.
-
-Warmup compiles every conventional pair and its conventional nested
-dependencies in deterministic dependency order, and reports failures together.
-Cycles and missing nested registrations fail warmup rather than recursing at
-runtime. It is safe to run repeatedly. Development may set `generateOnDemand: true`; this is a local
-convenience, not a substitute for CI/deployment warmup. Generated files are
-locked, linted, atomically published, checked for safe owner-only permissions,
-and ignored by Git. Do not place the cache in a shared or attacker-writable
-directory. Deploy the transformer classes and application wiring first, then
-warm the cache with the same registry that production will use. A transformer
-signature or source-file change intentionally invalidates the generated mapper
-cache; warm again after every such deployment. Constant values participate in
-the same cache identity and are emitted as fixed literals, so re-warm after a
-constant registration changes as well.
-
-## Prepared cache for long-running workers
-
-By default, each conventional mapping execution revalidates its metadata and
-generated-cache key. This is the development-safe mode: changes to mapped
-source, target, or transformer PHP files are detected by the normal cache-key
-path in a live process.
-
-For a production worker with a fixed, application-owned mapping registry, opt
-in to reuse the prepared conventional mapping for the lifetime of each exact
-`MappingDefinition` object:
+Use a non-public owner-only (`0700`) cache directory warmed by the same OS user
+that runs production. Keep `generateOnDemand: false` in production, opt in to
+`reusePreparedMappings: true` for a fixed application-owned registry, and warm
+before traffic:
 
 ```php
 $cache = new MapperCache(
@@ -363,265 +334,35 @@ $cache = new MapperCache(
 );
 $mapper = new ObjectMapper($registry, $cache);
 
-// Run once while the worker boots, before it accepts requests.
+// Run once during deployment or worker boot, before accepting requests.
 $mapper->warmup();
 ```
 
-This opt-in avoids repeated reflection, source-file hashing, metadata
-normalization, and generated-code rendering for a prepared definition. It is a
-trust boundary: **live PHP code edits and registration changes are not detected
-in an already running worker.** Deploy in this order:
+`warmup()` compiles conventional pairs and their conventional nested
+dependencies in deterministic order and reports failures together. Custom and
+provider-custom mappings are skipped: warmup never resolves a provider or
+executes a custom mapper. It is safe to run repeatedly.
 
-```text
-publish application code and trusted registrations
-  -> start or restart every PHP worker
-  -> construct the mapper with reusePreparedMappings: true
-  -> warmup() successfully
-  -> accept traffic
-```
+Prepared mappings are a trust boundary: live PHP edits and registration changes
+are not detected in a running worker. Restart or reload every worker after
+deploying mapped source, target, transformer, or registration changes. Prepared
+entries are local to one worker and are neither shared nor synchronized between
+workers.
 
-Restart or reload every worker whenever mapped source, target, transformer, or
-mapping-registration code changes. Prepared entries are local to one worker;
-they are neither shared nor synchronized between workers. Keep
-`generateOnDemand: false` in production and do not defer first-time preparation
-until traffic is being served.
+See [docs/production.md](docs/production.md) for the trust model (validation vs.
+reentry/Fiber isolation vs. application code), release-specific cache
+directories and cleanup, platform limits (FPM first-preparation cost, CLI
+`exec()`/lint, unverified FPM on-demand generation, non-yielding
+Swoole/OpenSwoole), worker operations, invalidation guarantees including the
+limited parent/trait guarantee, and benchmark methodology with the historical
+`0.9.0` measurements.
 
-The registry must be fixed application configuration. Do not put
-`MappingDefinition` instances derived from request, tenant, or user input in a
-shared long-running registry, and do not retain request state in definitions,
-transformers, or custom mappers. Distinct dynamic definitions may retain
-generated mappers for a worker lifetime. Custom and provider-custom mappings
-continue to execute through their own runtime dispatch and are not prepared by
-this option.
+## Upgrading generated cache
 
-### Worker operations
-
-- **FrankenPHP worker mode:** construct and warm the mapper during each worker
-  boot, then gracefully restart workers after deployment. Use file watching
-  only for local development, not as production invalidation.
-- **RoadRunner:** warm during worker boot and reload the worker pool after a
-  deployment (for example, `rr reset`).
-- **Swoole/OpenSwoole:** publish the release first, then gracefully reload
-  workers so every replacement worker boots and warms before serving requests.
-  This mode is supported only for **non-yielding** mapping operations. A source
-  getter, transformer, or custom mapper must not yield through coroutine I/O
-  while mapping; the Fiber isolation coverage is for native PHP Fibers, not a
-  Swoole/OpenSwoole coroutine-local context.
-
-Mapping failures retain structured pair/parameter diagnostics. Do not add the
-mapped source object or its values to application logs.
-
-### Mapping execution contexts
-
-The runtime keeps mapping state local to the current execution model: the main
-PHP context has its own slot, and every native PHP `Fiber` has independent
-state. Multiple Fibers may suspend and resume interleaved mappings without
-sharing declared nested dependencies, collection diagnostics, or failure
-provenance. A native Fiber may resume after a nested getter, transformer, or
-custom mapper yields, and may map again after either success or a caught
-failure.
-
-Every public `MapperCache::map()` call is an independent execution boundary,
-including recursive calls from application callbacks. Nested dispatch can use
-only dependencies declared by its active mapping frame. Frames restore the
-previous execution in `finally`, including when preparation, a callback, or
-generated mapping code throws. A completed mapping does not retain its source,
-mapped objects, caught exception, or request-scoped collaborator; Fiber-owned
-runtime state does not make an earlier failure valid in a later mapping on the
-same Fiber.
-
-This remains an internal runtime implementation detail. `ObjectMapper::map()`,
-`NestedMappingRuntimeInterface`, generated format `7`, and prepared-cache
-ownership/lifecycle are unchanged. Native Fiber coverage does not extend the
-non-yielding Swoole/OpenSwoole restriction described above.
-
-Conventional mappings without nested or collection rules now use lightweight
-execution at the root and when reached as leaves. Eligibility is recorded during
-preparation; warm prepared calls do not rescan metadata for this classification.
-Getters, transformers, and target constructors run behind an isolation barrier
-without access to enclosing dependencies or collection diagnostics. Replayed
-parent errors are sanitized, including errors whose provenance was not yet
-consumed. Public APIs, generated format `7`, prepared-cache ownership and worker
-lifecycle, and default source-file invalidation remain unchanged.
-
-### Benchmarking prepared mappings
-
-Run the included benchmark after dependency installation:
-
-```sh
-php tools/benchmark.php
-```
-
-It emits JSON with the median of five rounds for throughput, wall-clock time,
-current-process user/system CPU time, and PHP-memory deltas. CPU time excludes
-child processes, so do not use the cold-first result as a total deployment CPU
-measurement: it includes generated-file linting in a child PHP process.
-
-For release `0.9.0`, a seven-round run after warmup produced the following
-medians. The run used PHP 8.5.8 CLI on an
-Intel Core Ultra 5 135U, pinned to one CPU; OPcache CLI was enabled, while JIT,
-PCOV, and Xdebug were disabled:
-
-| Scenario | Default | Prepared | CPU time per mapping |
-| --- | ---: | ---: | ---: |
-| Simple DTO | 8,814 ops/s | 1,631,152 ops/s | 0.113335 ms → 0.000614 ms |
-| Nested DTO | 3,220 ops/s | 346,640 ops/s | 0.312951 ms → 0.002886 ms |
-| Collection of 100 DTOs | 3,029 ops/s | 38,459 ops/s | 0.330580 ms → 0.026020 ms |
-
-Reproduce this table with:
-
-```sh
-XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --workload=legacy --rounds=7
-```
-
-The hot-path runs retained no additional PHP allocator memory between rounds.
-Run the benchmark on target hardware and compare ratios rather than treating
-these absolute values as a production capacity guarantee.
-
-### Benchmarking execution contexts
-
-Release `0.9.0` includes workloads for flat, deep nested, diamond, collection,
-native-Fiber, and expected-failure paths. Each reports correctness checks
-outside timing and repeated-call PHP and allocator-retention deltas.
-The Fiber workload constructs and warms the mapper before timing suspend/resume
-operations.
-
-Use the `0.9.0` harness from one fixed checkout to compare `0.8.0` and `0.9.0`.
-`--runtime-root` selects the library source while keeping the physical harness
-and fixtures identical. A missing or mismatched runtime class aborts the run;
-the JSON `runtime_isolation` record verifies which source tree was loaded.
-`--execution-context-mode=prepared`, `default`, or `both` selects the cache
-mode (`both` is the default). Keep PHP settings, CPU affinity, iterations,
-and rounds identical across versions:
-
-```sh
-XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/0.8.0 --workload=contexts --execution-context-mode=prepared --simple-iterations=200000 --collection-iterations=5000 --context-iterations=30000 --fiber-iterations=30000 --rounds=5
-XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/0.9.0 --workload=contexts --execution-context-mode=prepared --simple-iterations=200000 --collection-iterations=5000 --context-iterations=30000 --fiber-iterations=30000 --rounds=5
-```
-
-Use `--workload=flat`, `collection`, `deep`, `diamond`, `fiber`, or `failure`
-to repeat one shape. `--workload=collections` selects the separate collection
-matrix. Alternate versions across runs, and keep setup, warmup, source
-construction, and correctness checks outside the measured loop.
-
-Release `0.9.0` passed 271 tests / 3,014 assertions on PHP 8.2–8.5. Coverage
-includes suspended/resumed getters, transformers and custom mappers, failed
-provider lookups, independent main-context work, public-cache reentry, partial
-preparation failures, failure provenance, and weak-reference cleanup.
-Native Fiber verification does not establish Swoole coroutine support.
-
-### Benchmarking lightweight leaf execution
-
-Release `0.9.0` avoids structural execution tables for conventional mappings
-without nested or collection rules. Prepared calls reuse the classification
-recorded during preparation; getters, transformers and constructors retain
-their isolation and exception guarantees.
-
-Use `--workload=flat`, `getter-transformer`, or `nested` with the same harness
-and each version's `--runtime-root` to compare these workloads with `0.8.0`.
-The [prepared-mapping table](#benchmarking-prepared-mappings) reports absolute
-`0.9.0` measurements; the [collection comparison](#benchmarking-collection-execution)
-below reports throughput ratios against `0.8.0`.
-
-### Benchmarking collection execution
-
-The collection matrix covers sizes 0, 1, 100, and 1000 for conventional leaves,
-structural children, transformer-backed leaves, direct custom mappers, and
-provider-backed custom mappers, in default and prepared-cache modes:
-
-```sh
-XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/0.8.0 --workload=collections --iterations=200 --rounds=5
-XDEBUG_MODE=off taskset -c 2 php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --runtime-root=/absolute/path/to/0.9.0 --workload=collections --iterations=200 --rounds=5
-```
-
-JSON includes collections/s, items/s, per-round timings, CPU and memory
-measurements, and retained-memory checks. An empty collection has zero items/s;
-use collections/s to compare its overhead. Repeat with `-d opcache.enable_cli=0`
-for a non-OPcache comparison. Disable coverage and profiling uniformly.
-
-Both versions must load the same physical fixture file: default-cache mode
-hashes source files, so comparing different fixture locations can distort
-results.
-
-A focused comparison used PHP 8.5.8 CLI, pinned to CPU 2, with OPcache on and
-JIT/PCOV/Xdebug off. One physical harness copy was restricted to one shape,
-prepared mode, and 1000 elements. Each run measured five rounds of 1000
-collections; the version comparison used `0.9.0 / 0.8.0 / 0.8.0 / 0.9.0` order.
-
-| Prepared collection, 1000 elements | 0.8.0 collections/s | 0.9.0 collections/s | 0.9.0 / 0.8.0 throughput |
-| --- | ---: | ---: | ---: |
-| Conventional leaf | 757–773 | 4,139–4,194 | 5.351–5.543× |
-| Direct custom | 1,758–1,763 | 3,962–4,055 | 2.247–2.307× |
-| Provider custom | 1,545–1,563 | 3,009–3,063 | 1.947–1.960× |
-
-Ratios compare paired run medians; they are not confidence intervals or
-application speedups. Multiply collections/s by 1000 to obtain items/s.
-All repeated-call retention probes were zero. The full 40-workload matrix
-also passed its correctness and retention checks, but variable control timings
-make it less suitable for attributing small performance differences.
-
-To repeat the focused comparison, use one frozen copy of `tools/benchmark.php`
-for both versions and restrict `benchmarkCollections()` to one shape (`custom`,
-`provider`, or `leaf`), prepared mode, and size 1000; use
-`--iterations=1000 --rounds=5`. Keep its autoloader pointed at the installed
-dependencies and retain the same physical fixture path across runs.
-
-These CLI measurements do not establish FPM capacity or an OPcache-off speedup.
-Repeat representative workloads on deployment hardware with the real providers
-and custom mappers used by the application.
-
-### Custom/provider collection follow-up
-
-In `0.9.0`, custom collections bind the validated definition once and execute
-through the existing custom executor inside an isolated per-element boundary.
-Provider lookup remains per element; returned targets are checked before
-proceeding to the next item. Source matching, callback order, and error
-sanitization are preserved. The [version comparison above](#benchmarking-collection-execution)
-includes this optimization when comparing `0.9.0` with `0.8.0`.
-
-## Upgrading generated cache to format 7
-
-Upgrading from `0.8.0` to `0.9.0` changes generated-mapper cache format from `6`
-to `7`. Format-6 files are not reused. Deploy the application code and trusted
-registrations, rotate the previous cache directory, and warm the new
-owner-only (`0700`) cache as the runtime owner before serving traffic. Generated
-files remain `0600`. With `generateOnDemand: false`, deployment must complete
-warmup successfully before requests reach the release.
-
-Restart or reload every long-running PHP worker so it loads the new runtime
-and generated mappers; this is required for workers using prepared-mapping
-reuse too. Do not mix an old runtime with newly generated format-7 code.
-
-## Upgrading generated cache to format 8
-
-The next release changes generated-mapper cache format from `7` to `8`.
-Format-7 files are not reused. Deploy the application code and trusted
-registrations, rotate the previous cache directory, and warm the new owner-only
-(`0700`) cache as the runtime owner before serving traffic. Generated files
-remain `0600`. With `generateOnDemand: false`, deployment must complete warmup
-successfully before requests reach the release.
-
-Restart or reload every long-running PHP worker so it loads the new runtime and
-generated mappers; this is required for workers using prepared-mapping reuse
-too. Do not mix an older runtime with newly generated format-8 code.
-
-## Upgrading to 0.9.0
-
-Create one `MappingRegistry` during application wiring and pass that same
-instance to both `MappingMetadataFactory` and `MapperCache` for structural
-rules. Existing transformer wiring remains shared in the same way. Direct
-`CustomMappingDefinition` registrations are unchanged. For provider-backed
-definitions, additionally pass the same optional provider to `ObjectMapper`
-and `MapperCache`, as shown above. `warmup()` skips every custom mapping,
-including provider-backed children: it neither resolves a provider nor creates
-or executes a custom mapper.
-
-Release `0.9.0` preserves public mapping interfaces and application wiring,
-but changes generated-mapper cache format from `6` in `0.8.0` to `7`.
-Follow the [cache migration instructions](#upgrading-generated-cache-to-format-7):
-deploy the updated code and registrations, warm a new owner-only (`0700`) cache,
-and restart or reload long-running workers before serving traffic.
-
+Generated-mapper cache format is now `8`. Format-7 files are not reused. Rotate
+to a fresh owner-only (`0700`) cache directory, warm it with the new runtime, and
+restart or reload long-running workers. See
+[the format-8 migration instructions](docs/production.md#upgrading-generated-cache-to-format-8).
 ## Mapping rules and guarantees
 
 - Source and target must be existing concrete classes and each pair is unique.

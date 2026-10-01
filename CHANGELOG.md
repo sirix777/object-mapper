@@ -28,6 +28,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `0700` cache as its runtime owner before traffic, and restart or reload all
   long-running workers, including prepared-mapping reuse. Generated files remain
   `0600`.
+- Production, trust, lifecycle, invalidation, platform limits, and benchmark
+  methodology are now consolidated in `docs/production.md`; the README keeps a
+  concise quickstart and links to it. Historical `0.9.0` measurements are marked
+  historical and are not format-8 results.
 
 ## [0.9.0] - 2026-09-09
 
