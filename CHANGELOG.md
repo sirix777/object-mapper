@@ -6,6 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `MappingExecutionFailed::reason(): ?MappingFailureReason` exposes a coarse,
+  boundary-level failure category (`GeneratedMappingFailed`,
+  `CustomMapperFailed`, `ProviderUnavailable`, `ProviderResolutionFailed`,
+  `UnexpectedTarget`, `CollectionElementType`). Reasons never include source
+  data, provider identifiers, or original exception messages, and a forged
+  reason on an application-thrown `MappingExecutionFailed` is not trusted.
+
 ### Changed
 
 - Conventional mappings now reject by-reference target constructor parameters

@@ -175,6 +175,33 @@ request-scoped collaborator.
 Mapping failures retain structured pair/parameter diagnostics. Do not add mapped
 source objects or their values to application logs.
 
+## Failure reasons
+
+`MappingExecutionFailed::reason()` exposes an optional, coarse
+`MappingFailureReason` identifying the failing boundary:
+
+- `GeneratedMappingFailed` — a generated conventional mapper failed (source
+  getter, transformer, target constructor, or another generated failure).
+- `CustomMapperFailed` — an application custom mapper threw.
+- `ProviderUnavailable` — a provider-backed custom mapping had no provider.
+- `ProviderResolutionFailed` — the provider lookup threw.
+- `UnexpectedTarget` — a custom mapper returned a value that is not the
+  requested target.
+- `CollectionElementType` — an authenticated collection element failed its type
+  check.
+
+Reasons are boundary-level only. They never distinguish a getter failure from a
+constructor failure (both are `GeneratedMappingFailed`), never include source
+data, provider identifiers, or original exception messages, and are not derived
+from an application-thrown `MappingExecutionFailed` (a forged reason is
+re-wrapped with the boundary's own reason). `reason()` is `null` for legacy
+construction and for failures outside these boundaries.
+
+A nested custom or provider custom failure can surface to the caller as the
+enclosing conventional mapping's `GeneratedMappingFailed`: the child boundary's
+reason is not guaranteed to survive a parent re-wrap. Treat `reason()` as the
+category of the boundary that actually threw to the caller, not a full chain.
+
 ## Benchmark methodology
 
 Run the included benchmark after dependency installation:

@@ -14,6 +14,7 @@ use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
+use Sirix\ObjectMapper\Exception\MappingFailureReason;
 use Sirix\ObjectMapper\Exception\MappingNotRegistered;
 use Sirix\ObjectMapper\Generator\MapperCache;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
@@ -336,7 +337,7 @@ final readonly class ObjectMapper implements WarmableObjectMapperInterface
                 throw new MappingExecutionFailed(sprintf(
                     'Could not execute mapping %s.',
                     $mappingDefinition->key(),
-                ));
+                ), reason: MappingFailureReason::UnexpectedTarget);
             }
 
             throw new MappingExecutionFailed(sprintf(
@@ -344,7 +345,7 @@ final readonly class ObjectMapper implements WarmableObjectMapperInterface
                 $mappingDefinition->key(),
                 $mapped::class,
                 $target,
-            ));
+            ), reason: MappingFailureReason::UnexpectedTarget);
         }
 
         return $mapped;

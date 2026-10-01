@@ -9,6 +9,7 @@ use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
+use Sirix\ObjectMapper\Exception\MappingFailureReason;
 use Throwable;
 
 use function sprintf;
@@ -20,26 +21,36 @@ final readonly class CustomMappingExecutor
 
     public function map(CustomMappingDefinition|ProviderCustomMappingDefinition $mappingDefinition, object $source): object
     {
-        try {
-            $mapper = $mappingDefinition instanceof CustomMappingDefinition
-                ? $mappingDefinition->mapper
-                : $this->providerMapper($mappingDefinition);
+        $mapper = $mappingDefinition instanceof CustomMappingDefinition
+            ? $mappingDefinition->mapper
+            : $this->resolveProviderMapper($mappingDefinition);
 
+        try {
             return $mapper->map($source);
         } catch (Throwable) {
             throw new MappingExecutionFailed(sprintf(
                 'Could not execute mapping %s.',
                 $mappingDefinition->key(),
-            ));
+            ), reason: MappingFailureReason::CustomMapperFailed);
         }
     }
 
-    private function providerMapper(ProviderCustomMappingDefinition $providerCustomMappingDefinition): CustomObjectMapperInterface
+    private function resolveProviderMapper(ProviderCustomMappingDefinition $providerCustomMappingDefinition): CustomObjectMapperInterface
     {
         if (! $this->customObjectMapperProvider instanceof CustomObjectMapperProviderInterface) {
-            throw new MappingExecutionFailed('A custom mapper provider is required.');
+            throw new MappingExecutionFailed(sprintf(
+                'Could not execute mapping %s.',
+                $providerCustomMappingDefinition->key(),
+            ), reason: MappingFailureReason::ProviderUnavailable);
         }
 
-        return $this->customObjectMapperProvider->get($providerCustomMappingDefinition->mapperId());
+        try {
+            return $this->customObjectMapperProvider->get($providerCustomMappingDefinition->mapperId());
+        } catch (Throwable) {
+            throw new MappingExecutionFailed(sprintf(
+                'Could not execute mapping %s.',
+                $providerCustomMappingDefinition->key(),
+            ), reason: MappingFailureReason::ProviderResolutionFailed);
+        }
     }
 }

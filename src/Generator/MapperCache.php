@@ -15,6 +15,7 @@ use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
+use Sirix\ObjectMapper\Exception\MappingFailureReason;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Runtime\CollectionMappingRuntimeInterface;
@@ -253,7 +254,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
                 throw new MappingExecutionFailed(sprintf(
                     'Could not execute mapping %s.',
                     $mappingDefinition->key(),
-                ));
+                ), reason: MappingFailureReason::UnexpectedTarget);
             }
 
             throw new MappingCompilationFailed(sprintf(
@@ -431,7 +432,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
 
             if (! $result instanceof $elementTarget) {
                 if ($definition instanceof ProviderCustomMappingDefinition) {
-                    throw new MappingExecutionFailed(sprintf('Could not execute mapping %s.', $definition->key()));
+                    throw new MappingExecutionFailed(sprintf('Could not execute mapping %s.', $definition->key()), reason: MappingFailureReason::UnexpectedTarget);
                 }
 
                 throw new MappingCompilationFailed(sprintf(
@@ -552,12 +553,12 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
 
             $collectionFailure = $this->resolveCollectionFailure($mappingExecutionContext, $exception, $mappingDefinition);
             if (null !== $collectionFailure) {
-                throw $this->executionFailure($mappingDefinition, $collectionFailure);
+                throw $this->executionFailure($mappingDefinition, $collectionFailure, MappingFailureReason::CollectionElementType);
             }
 
             throw $this->executionFailure($mappingDefinition);
         } catch (Throwable) {
-            throw new MappingExecutionFailed(sprintf('Could not execute mapping %s.', $mappingDefinition->key()));
+            throw $this->executionFailure($mappingDefinition);
         } finally {
             $this->exitMapping($mappingExecutionContext, $mappingExecutionFrame);
         }
@@ -598,9 +599,12 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         return $this->fiberExecutionContexts[$fiber] ??= new MappingExecutionContext();
     }
 
-    private function executionFailure(MappingDefinition $mappingDefinition, ?string $message = null): MappingExecutionFailed
+    private function executionFailure(MappingDefinition $mappingDefinition, ?string $message = null, ?MappingFailureReason $mappingFailureReason = null): MappingExecutionFailed
     {
-        return new MappingExecutionFailed($message ?? sprintf('Could not execute mapping %s.', $mappingDefinition->key()));
+        return new MappingExecutionFailed(
+            $message ?? sprintf('Could not execute mapping %s.', $mappingDefinition->key()),
+            reason: $mappingFailureReason ?? MappingFailureReason::GeneratedMappingFailed,
+        );
     }
 
     /**

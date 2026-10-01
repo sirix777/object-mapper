@@ -30,6 +30,7 @@ use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
 use Sirix\ObjectMapper\Exception\MappingExecutionFailed;
+use Sirix\ObjectMapper\Exception\MappingFailureReason;
 use Sirix\ObjectMapper\Exception\MappingNotRegistered;
 use Sirix\ObjectMapper\Generator\MapperCache;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
@@ -1042,6 +1043,7 @@ final class ObjectMapperTest extends TestCase
         } catch (MappingExecutionFailed $exception) {
             self::assertStringContainsString(ForgedGetterSource::class . '->' . NameTarget::class, $exception->getMessage());
             self::assertStringNotContainsString('forged-sensitive-key', $exception->getMessage());
+            self::assertSame(MappingFailureReason::GeneratedMappingFailed, $exception->reason());
             self::assertNull($exception->getPrevious());
         }
     }
@@ -2668,6 +2670,7 @@ final class ObjectMapperTest extends TestCase
         } catch (MappingExecutionFailed $exception) {
             self::assertStringContainsString(MaliciousCollectionFailureSource::class . '->' . ReleaseCollectionDto::class, $exception->getMessage());
             self::assertStringNotContainsString('attacker-secret', $exception->getMessage());
+            self::assertSame(MappingFailureReason::GeneratedMappingFailed, $exception->reason());
             self::assertNull($exception->getPrevious());
         }
 
@@ -3552,6 +3555,7 @@ final class ObjectMapperTest extends TestCase
         } catch (MappingExecutionFailed $exception) {
             self::assertSame(['captured', 'replayed-parent-context'], $collectionExecutionTrace->events);
             self::assertSame('Could not execute mapping ' . $mappingDefinition->key() . '.', $exception->getMessage());
+            self::assertSame(MappingFailureReason::GeneratedMappingFailed, $exception->reason());
             self::assertNull($exception->getPrevious());
         }
         self::assertInstanceOf(GeneratedMappingExecutionFailed::class, $captured);
@@ -3564,6 +3568,7 @@ final class ObjectMapperTest extends TestCase
             self::fail('Expected replay into a later root to remain sanitized.');
         } catch (MappingExecutionFailed $exception) {
             self::assertSame('Could not execute mapping ' . CallbackLeafSource::class . '->' . $target . '.', $exception->getMessage());
+            self::assertSame(MappingFailureReason::GeneratedMappingFailed, $exception->reason());
             self::assertNull($exception->getPrevious());
         }
         self::assertLeafCannotBorrowParentContext($cache);
@@ -3609,6 +3614,7 @@ final class ObjectMapperTest extends TestCase
         } catch (MappingExecutionFailed $exception) {
             self::assertSame(['first', 'captured', 'replayed'], $collectionExecutionTrace->events);
             self::assertSame('Could not execute mapping ' . ObservedReleaseCollectionsSource::class . '->' . ObservedReleaseCollectionsDto::class . '.', $exception->getMessage());
+            self::assertSame(MappingFailureReason::GeneratedMappingFailed, $exception->reason());
             self::assertNull($exception->getPrevious());
         }
         $observedReleaseCollectionsDto = $mapper->map(new ObservedReleaseCollectionsSource([
