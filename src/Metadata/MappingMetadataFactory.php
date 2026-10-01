@@ -208,18 +208,26 @@ final class MappingMetadataFactory
             $rules      = $mappingDefinition->rules;
             foreach ($constructor->getParameters() as $reflectionParameter) {
                 $mapRule = $rules[$reflectionParameter->getName()] ?? null;
-                if ($reflectionParameter->isVariadic()) {
-                    $configuration = $mapRule instanceof MapRule
-                        ? ($mapRule->isConstant() ? 'Configured constant: ' : sprintf('Configured selector %s: ', $this->describeRule($mapRule)))
-                        : '';
+                if ($reflectionParameter->isPassedByReference()) {
+                    throw new MappingCompilationFailed($this->message(
+                        $source,
+                        $target,
+                        $reflectionParameter->getName(),
+                        sprintf(
+                            '%sBy-reference target parameters are not supported.',
+                            $this->ruleConfigurationPrefix($mapRule),
+                        ),
+                    ));
+                }
 
+                if ($reflectionParameter->isVariadic()) {
                     throw new MappingCompilationFailed($this->message(
                         $source,
                         $target,
                         $reflectionParameter->getName(),
                         sprintf(
                             '%sVariadic target parameters are not supported.',
-                            $configuration,
+                            $this->ruleConfigurationPrefix($mapRule),
                         ),
                     ));
                 }
@@ -1188,6 +1196,17 @@ final class MappingMetadataFactory
                 ));
             }
         }
+    }
+
+    private function ruleConfigurationPrefix(?MapRule $mapRule): string
+    {
+        if (! $mapRule instanceof MapRule) {
+            return '';
+        }
+
+        return $mapRule->isConstant()
+            ? 'Configured constant: '
+            : sprintf('Configured selector %s: ', $this->describeRule($mapRule));
     }
 
     private function describeRule(MapRule $mapRule): string

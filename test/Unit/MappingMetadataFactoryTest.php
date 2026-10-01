@@ -6,6 +6,7 @@ namespace Sirix\ObjectMapperTest\Unit;
 
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
@@ -27,6 +28,11 @@ use Sirix\ObjectMapperTest\Support\AccessToken;
 use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
 use Sirix\ObjectMapperTest\Support\BooleanGetterSource;
 use Sirix\ObjectMapperTest\Support\BooleanTarget;
+use Sirix\ObjectMapperTest\Support\ByReferenceConstantTarget;
+use Sirix\ObjectMapperTest\Support\ByReferenceOptionalTarget;
+use Sirix\ObjectMapperTest\Support\ByReferenceReadonlySource;
+use Sirix\ObjectMapperTest\Support\ByReferenceRequiredTarget;
+use Sirix\ObjectMapperTest\Support\ByReferenceTargetSource;
 use Sirix\ObjectMapperTest\Support\ByReferenceTransformTransformer;
 use Sirix\ObjectMapperTest\Support\ConstantSource;
 use Sirix\ObjectMapperTest\Support\ConstantTarget;
@@ -446,6 +452,46 @@ final class MappingMetadataFactoryTest extends TestCase
             ],
             ['passwordHash'],
         ), 'Configured selector $uuid');
+    }
+
+    /**
+     * @param class-string           $source
+     * @param class-string           $target
+     * @param array<string, MapRule> $rules
+     */
+    #[DataProvider('byReferenceTargetProvider')]
+    public function testItRejectsByReferenceTargetParametersBeforeReadingSource(string $source, string $target, array $rules): void
+    {
+        try {
+            $this->mappingMetadataFactory->create(new MappingDefinition($source, $target, $rules));
+            self::fail('Expected by-reference target parameters to be rejected.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString($source . ' -> ' . $target, $exception->getMessage());
+            self::assertStringContainsString('$value', $exception->getMessage());
+            self::assertStringContainsString('By-reference target parameters are not supported.', $exception->getMessage());
+            if ([] !== $rules) {
+                self::assertStringContainsString('Configured constant: By-reference target parameters are not supported.', $exception->getMessage());
+            }
+        }
+    }
+
+    /**
+     * @return iterable<string, array{class-string, class-string, array<string, MapRule>}>
+     */
+    public static function byReferenceTargetProvider(): iterable
+    {
+        yield 'required parameter' => [ByReferenceTargetSource::class, ByReferenceRequiredTarget::class, []];
+
+        yield 'optional parameter'  => [ByReferenceTargetSource::class, ByReferenceOptionalTarget::class, []];
+
+        yield 'optional parameter without source' => [ConstantSource::class, ByReferenceOptionalTarget::class, []];
+
+        yield 'constant rule'       => [
+            ConstantSource::class, ByReferenceConstantTarget::class, [
+                'value' => MapRule::constant('constant'),
+            ]];
+
+        yield 'readonly source'     => [ByReferenceReadonlySource::class, ByReferenceRequiredTarget::class, []];
     }
 
     public function testItCompilesAnExplicitMethodThroughARegisteredTransformer(): void

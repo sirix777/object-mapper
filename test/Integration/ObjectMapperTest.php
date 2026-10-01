@@ -41,6 +41,9 @@ use Sirix\ObjectMapper\Runtime\ObjectMapper;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use Sirix\ObjectMapperTest\Support\AccessToken;
 use Sirix\ObjectMapperTest\Support\ApiAccessTokenDto;
+use Sirix\ObjectMapperTest\Support\ByReferenceRecordingTransformer;
+use Sirix\ObjectMapperTest\Support\ByReferenceRequiredTarget;
+use Sirix\ObjectMapperTest\Support\ByReferenceTargetSource;
 use Sirix\ObjectMapperTest\Support\CallbackLeafDto;
 use Sirix\ObjectMapperTest\Support\CallbackLeafHolderDto;
 use Sirix\ObjectMapperTest\Support\CallbackLeafHolderSource;
@@ -201,6 +204,44 @@ final class ObjectMapperTest extends TestCase
         $cacheFiles = glob($this->cacheDirectory . '/Mapper_*.php') ?: [];
         self::assertCount(1, $cacheFiles);
         self::assertSame(0o600, fileperms($cacheFiles[0]) & 0o777);
+    }
+
+    public function testItRejectsByReferenceTargetParametersBeforeReadingSource(): void
+    {
+        $byReferenceTargetSource            = new ByReferenceTargetSource();
+        $mappingDefinition                  = new MappingDefinition(
+            ByReferenceTargetSource::class,
+            ByReferenceRequiredTarget::class,
+            [
+                'value' => MapRule::from('value')->through(ByReferenceRecordingTransformer::class),
+            ],
+        );
+        $mappingRegistry                  = new MappingRegistry([$mappingDefinition]);
+        $countingValueTransformerRegistry = new CountingValueTransformerRegistry(new ByReferenceRecordingTransformer());
+        $objectMapper                     = new ObjectMapper(
+            $mappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($countingValueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $countingValueTransformerRegistry,
+                false,
+                $mappingRegistry,
+            ),
+        );
+
+        try {
+            $objectMapper->warmup();
+            self::fail('Expected the by-reference target constructor to be rejected.');
+        } catch (MappingCompilationFailed $exception) {
+            self::assertStringContainsString(ByReferenceTargetSource::class . ' -> ' . ByReferenceRequiredTarget::class, $exception->getMessage());
+            self::assertStringContainsString('$value', $exception->getMessage());
+            self::assertStringContainsString('By-reference target parameters are not supported.', $exception->getMessage());
+        }
+
+        self::assertSame(0, $countingValueTransformerRegistry->getCalls);
+        self::assertSame(1, $byReferenceTargetSource->value);
+        self::assertSame([], glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
     }
 
     public function testItImplementsSeparateMappingAndWarmupContracts(): void

@@ -1018,3 +1018,45 @@ final class IndirectCycleDtoC
 {
     public function __construct(public IndirectCycleDtoA $child) {}
 }
+
+final class ByReferenceTargetSource
+{
+    public int $value = 1;
+}
+
+final readonly class ByReferenceReadonlySource
+{
+    public function __construct(public int $value = 1) {}
+}
+
+final readonly class ByReferenceRequiredTarget
+{
+    public function __construct(int &$value)
+    {
+        $value = 99;
+    }
+}
+
+final readonly class ByReferenceOptionalTarget
+{
+    public function __construct(int &$value = 0)
+    {
+        $value = 99;
+    }
+}
+
+final readonly class ByReferenceConstantTarget
+{
+    public function __construct(string &$value)
+    {
+        $value = 'mutated';
+    }
+}
+
+final class ByReferenceRecordingTransformer implements ValueTransformerInterface
+{
+    public function transform(int $value): int
+    {
+        return $value;
+    }
+}
