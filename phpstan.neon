@@ -1,5 +1,8 @@
 parameters:
 	level: 8
+	# Parse/analyse as the highest supported syntax (property hooks); runtime
+	# behaviour on 8.2/8.3 is still covered by the version-guarded test matrix.
+	phpVersion: 80400
 	paths:
 		- src
 		- test

@@ -2,11 +2,18 @@
 
 declare(strict_types=1);
 
+use PhpCsFixer\Finder;
 use Sirix\CsFixerConfig\ConfigBuilder;
 
+$finder = Finder::create()
+    ->in(__DIR__ . '/src')
+    ->in(__DIR__ . '/test')
+    // PHP 8.4-only property-hook syntax; the linter cannot parse it on PHP 8.2/8.3.
+    ->notPath('Support/PropertyHookFixtures.php')
+;
+
 return ConfigBuilder::create()
-    ->inDir(__DIR__ . '/src')
-    ->inDir(__DIR__ . '/test')
+    ->setFinder($finder)
     ->setRules([
         '@PHP8x2Migration' => true,
         'Gordinskiy/line_length_limit' => false,
