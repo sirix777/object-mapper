@@ -215,7 +215,7 @@ final class MapperCacheSecurityTest extends TestCase
             for ($index = 0; $index < 2; ++$index) {
                 $pipes   = [];
                 $process = proc_open(
-                    [PHP_BINARY, dirname(__DIR__) . '/Support/CacheWarmupProcess.php', $this->cacheDirectory, $barrierPath],
+                    [PHP_BINARY, __DIR__ . '/../Support/CacheWarmupProcess.php', $this->cacheDirectory, $barrierPath],
                     [
                         1 => ['pipe', 'w'],
                         2 => ['pipe', 'w'],
@@ -294,7 +294,7 @@ final class MapperCacheSecurityTest extends TestCase
 
         $pipes   = [];
         $process = proc_open(
-            [PHP_BINARY, dirname(__DIR__) . '/Support/SilentChildProcess.php', '1200'],
+            [PHP_BINARY, __DIR__ . '/../Support/SilentChildProcess.php', '1200'],
             [
                 1 => ['pipe', 'w'],
                 2 => ['pipe', 'w'],
@@ -322,7 +322,7 @@ final class MapperCacheSecurityTest extends TestCase
         $readyPath = sys_get_temp_dir() . '/object-mapper-stubborn-ready-' . bin2hex(random_bytes(8));
         $pipes     = [];
         $process   = proc_open(
-            [PHP_BINARY, dirname(__DIR__) . '/Support/StubbornChildProcess.php', $readyPath],
+            [PHP_BINARY, __DIR__ . '/../Support/StubbornChildProcess.php', $readyPath],
             [
                 1 => ['pipe', 'w'],
                 2 => ['pipe', 'w'],
@@ -515,7 +515,7 @@ final class MapperCacheSecurityTest extends TestCase
     {
         $pipes   = [];
         $process = proc_open(
-            [PHP_BINARY, dirname(__DIR__) . '/Support/CacheWarmupProcess.php', $cacheDirectory, $barrierPath],
+            [PHP_BINARY, __DIR__ . '/../Support/CacheWarmupProcess.php', $cacheDirectory, $barrierPath],
             [
                 1 => ['pipe', 'w'],
                 2 => ['pipe', 'w'],
