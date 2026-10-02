@@ -47,6 +47,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   methodology are now consolidated in `docs/production.md`; the README keeps a
   concise quickstart and links to it. Historical `0.9.0` measurements are marked
   historical and are not format-8 results.
+- Integration tests are split by responsibility (Cycle proxy, structural
+  mapping, custom mapping, warmup, prepared cache, execution isolation). The
+  shared fixtures and base test case moved to `test/Support`; the test inventory
+  is unchanged (no case removed or duplicated).
 
 ## [0.9.0] - 2026-09-09
 

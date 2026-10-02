@@ -233,6 +233,29 @@ rounds identical across runs. Repeat representative workloads on deployment
 hardware with the real providers and custom mappers; the CLI numbers below are
 not a production capacity guarantee.
 
+### Current format-8 measurements
+
+A single harness run of the current release (generated format `8`, T1–T10
+changes) on PHP 8.5.10 CLI, OPcache CLI enabled, JIT/PCOV/Xdebug disabled,
+harness `0d5e7d12563c`, runtime source `19d26c7b5e46`, seven rounds:
+
+| Legacy workload | Default | Prepared |
+| --- | ---: | ---: |
+| Simple DTO (20,000) | 4,029 ops/s | 937,986 ops/s |
+| Nested DTO (3,000) | 2,183 ops/s | 365,504 ops/s |
+| Collection of 100 DTOs (300) | 1,723 ops/s | 37,370 ops/s |
+
+Reproduce with:
+
+```sh
+php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php --workload=legacy --simple-iterations=20000 --nested-iterations=3000 --collection-iterations=300 --rounds=7
+```
+
+These are a single non-pinned run on one machine, not a capacity guarantee; the
+absolute values differ from the historical `0.9.0` table below because of the
+environment and iteration counts. Prepared mappings remain an order of magnitude
+faster than default revalidation.
+
 ### Historical 0.9.0 measurements
 
 The tables and figures in this section describe **release `0.9.0`** (generated

@@ -10,6 +10,10 @@ require __DIR__ . '/CycleOrmProxyFixtures.php';
 
 require __DIR__ . '/Fixtures.php';
 
+require __DIR__ . '/IntegrationFixtures.php';
+
+require __DIR__ . '/ObjectMapperIntegrationTestCase.php';
+
 if (PHP_VERSION_ID >= 80400) {
     require __DIR__ . '/PropertyHookFixtures.php';
 }
