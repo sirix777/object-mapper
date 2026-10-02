@@ -14,6 +14,7 @@ use PHPUnit\Framework\Attributes\RequiresPhp;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 use ReflectionMethod;
+use ReflectionProperty;
 use RuntimeException;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
 use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
@@ -39,6 +40,8 @@ use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Metadata\NestedMappingMetadata;
 use Sirix\ObjectMapper\Runtime\CustomMappingExecutor;
 use Sirix\ObjectMapper\Runtime\GeneratedMappingExecutionFailed;
+use Sirix\ObjectMapper\Runtime\MappingExecution;
+use Sirix\ObjectMapper\Runtime\MappingExecutionFrame;
 use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapper\Runtime\ObjectMapper;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
@@ -148,6 +151,7 @@ use Sirix\ObjectMapperTest\Support\WrongParentCycleProxy;
 use stdClass;
 
 use Throwable;
+use WeakMap;
 use WeakReference;
 
 use function array_keys;
@@ -161,10 +165,12 @@ use function file_get_contents;
 use function file_put_contents;
 use function fileperms;
 use function function_exists;
+use function gc_collect_cycles;
 use function glob;
 use function hash;
 use function implode;
 use function in_array;
+use function is_array;
 use function is_dir;
 use function json_encode;
 use function mkdir;
@@ -2343,6 +2349,184 @@ final class ObjectMapperTest extends TestCase
         }
     }
 
+    public function testFixedPreparedRegistryReusesStructuralScopeTables(): void
+    {
+        $child  = new MappingDefinition(ExactChild::class, ExactChildDto::class);
+        $parent = new MappingDefinition(ExactHolderSource::class, ExactHolderDto::class, [
+            'child' => MapRule::from('child')->nested(ExactChildDto::class),
+        ]);
+        [$mapper, $mapperCache, $mappingMetadataFactory] = $this->fixedPreparedRuntime($child, $parent);
+
+        $mapper->warmup();
+        self::assertSame('a', $mapper->map(new ExactHolderSource(new ExactChild('a')), ExactHolderDto::class)->child->value);
+        self::assertSame('b', $mapper->map(new ExactHolderSource(new ExactChild('b')), ExactHolderDto::class)->child->value);
+
+        $metadata           = $mapperCache->metadata($parent);
+        $reflectionProperty = new ReflectionProperty(MappingMetadataFactory::class, 'dependencySnapshots');
+        $reflectionProperty->setValue($mappingMetadataFactory, new WeakMap());
+
+        $reflectionMethod = new ReflectionMethod(MapperCache::class, 'scopeMappings');
+
+        try {
+            $reflectionMethod->invoke($mapperCache, $parent, new MappingExecution(), $metadata);
+            self::fail('Expected rebuilt scope validation to fail once dependency snapshots are gone.');
+        } catch (MappingCompilationFailed) {
+            self::addToAssertionCount(1);
+        }
+
+        self::assertSame('c', $mapper->map(new ExactHolderSource(new ExactChild('c')), ExactHolderDto::class)->child->value);
+    }
+
+    public function testCustomRegistryStillValidatesEveryPreparedRoot(): void
+    {
+        $child  = new MappingDefinition(ExactChild::class, ExactChildDto::class);
+        $parent = new MappingDefinition(ExactHolderSource::class, ExactHolderDto::class, [
+            'child' => MapRule::from('child')->nested(ExactChildDto::class),
+        ]);
+        $swappable       = new SwappableDependencyRegistry(new MappingRegistry([$child, $parent]), ExactChild::class, ExactChildDto::class);
+        $objectMapper    = $this->mapperWithRegistry($swappable);
+
+        self::assertSame('a', $objectMapper->map(new ExactHolderSource(new ExactChild('a')), ExactHolderDto::class)->child->value);
+
+        $swappable->replacement = new MappingDefinition(ExactChild::class, ExactChildDto::class);
+        self::assertMapRejected($objectMapper, new ExactHolderSource(new ExactChild('b')));
+
+        $childTwo  = new MappingDefinition(ExactChild::class, ExactChildDto::class);
+        $parentTwo = new MappingDefinition(ExactHolderSource::class, ExactHolderDto::class, [
+            'child' => MapRule::from('child')->nested(ExactChildDto::class),
+        ]);
+        $swappableTwo = new SwappableDependencyRegistry(new MappingRegistry([$childTwo, $parentTwo]), ExactChild::class, ExactChildDto::class);
+        $mapperTwo    = $this->mapperWithRegistry($swappableTwo);
+
+        $mapperTwo->map(new ExactHolderSource(new ExactChild('a')), ExactHolderDto::class);
+        $swappableTwo->replacement = new MappingDefinition(ExactChild::class, ExactChildDto::class, sourceMatch: SourceMatchMode::CycleProxy);
+        self::assertMapRejected($mapperTwo, new ExactHolderSource(new ExactChild('b')));
+
+        $leaf   = new MappingDefinition(ThreeLevelLeafSource::class, ThreeLevelLeafDto::class);
+        $middle = new MappingDefinition(ThreeLevelMiddleSource::class, ThreeLevelMiddleDto::class, [
+            'child' => MapRule::from('child')->nested(ThreeLevelLeafDto::class),
+        ]);
+        $root = new MappingDefinition(ThreeLevelRootSource::class, ThreeLevelRootDto::class, [
+            'child' => MapRule::from('child')->nested(ThreeLevelMiddleDto::class),
+        ]);
+        $swappableThree = new SwappableDependencyRegistry(new MappingRegistry([$leaf, $middle, $root]), ThreeLevelLeafSource::class, ThreeLevelLeafDto::class);
+        $mapperThree    = $this->mapperWithRegistry($swappableThree);
+
+        $mapperThree->map(new ThreeLevelRootSource(new ThreeLevelMiddleSource(new ThreeLevelLeafSource('a'))), ThreeLevelRootDto::class);
+        $swappableThree->replacement = new MappingDefinition(ThreeLevelLeafSource::class, ThreeLevelLeafDto::class);
+        self::assertMapRejected($mapperThree, new ThreeLevelRootSource(new ThreeLevelMiddleSource(new ThreeLevelLeafSource('b'))), ThreeLevelRootDto::class);
+    }
+
+    public function testPreparedScopesNeverReuseExecutionProvenance(): void
+    {
+        $release    = new MappingDefinition(Release::class, ReleaseDto::class);
+        $collection = new MappingDefinition(ReleaseCollectionSource::class, ReleaseCollectionDto::class, [
+            'releases' => MapRule::from('releases')->collection(Release::class, ReleaseDto::class),
+        ]);
+        [$mapper, $mapperCache] = $this->fixedPreparedRuntime($release, $collection);
+
+        $mapper->warmup();
+        $mapper->map(new ReleaseCollectionSource([new Release('1')]), ReleaseCollectionDto::class);
+
+        try {
+            $createInvalidCollection = (static fn (mixed $releases): ReleaseCollectionSource => new ReleaseCollectionSource($releases));
+            $mapper->map($createInvalidCollection([new stdClass()]), ReleaseCollectionDto::class);
+            self::fail('Expected an invalid element to fail.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame(MappingFailureReason::CollectionElementType, $exception->reason());
+        }
+
+        $tables = (new ReflectionProperty(MapperCache::class, 'preparedScopeTables'))->getValue($mapperCache);
+        self::assertInstanceOf(WeakMap::class, $tables);
+        foreach ($tables as $table) {
+            self::assertFalse($this->containsExecutionState($table), 'A reused scope table must not retain execution state.');
+        }
+
+        self::assertSame([], $mapper->map(new ReleaseCollectionSource([]), ReleaseCollectionDto::class)->releases);
+
+        [$replayMapper, $replayCache]                   = $this->leafCallbackRuntime(true, 'getter');
+        $captured                                       = null;
+        $callbackLeafHolderSource                       = new CallbackLeafHolderSource(
+            new CallbackLeafSource(static function() use (&$captured): never {
+                self::assertInstanceOf(GeneratedMappingExecutionFailed::class, $captured);
+
+                throw $captured;
+            }),
+            [],
+            static function() use ($replayCache, &$captured): void {
+                try {
+                    $replayCache->collectionElementTypeFailure(CallbackLeafHolderSource::class, CallbackLeafHolderDto::class, 'releases', 7, Release::class, new AccessToken('replay-secret'));
+                } catch (GeneratedMappingExecutionFailed $exception) {
+                    $captured = $exception;
+                }
+            },
+        );
+        $replayMapper->warmup();
+
+        try {
+            $replayMapper->map($callbackLeafHolderSource, CallbackLeafHolderDto::class);
+            self::fail('Expected the captured collection failure to be sanitized during replay.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame(MappingFailureReason::GeneratedMappingFailed, $exception->reason());
+            self::assertNull($exception->getPrevious());
+        }
+
+        $fiber = new Fiber(static fn (): object => $replayMapper->map(
+            new CallbackLeafHolderSource(new CallbackLeafSource(static function() use (&$captured): never {
+                self::assertInstanceOf(GeneratedMappingExecutionFailed::class, $captured);
+
+                throw $captured;
+            }), []),
+            CallbackLeafHolderDto::class,
+        ));
+
+        try {
+            $fiber->start();
+            self::fail('Expected the Fiber replay to be sanitized.');
+        } catch (MappingExecutionFailed $exception) {
+            self::assertSame(MappingFailureReason::GeneratedMappingFailed, $exception->reason());
+            self::assertNull($exception->getPrevious());
+        }
+
+        $replayTables = (new ReflectionProperty(MapperCache::class, 'preparedScopeTables'))->getValue($replayCache);
+        self::assertInstanceOf(WeakMap::class, $replayTables);
+        foreach ($replayTables as $replayTable) {
+            self::assertFalse($this->containsExecutionState($replayTable), 'A reused scope table must not retain execution state after replay.');
+        }
+    }
+
+    public function testPreparedScopesDoNotKeepReleasedRootDefinitionsOrInputs(): void
+    {
+        $child                    = new MappingDefinition(ExactChild::class, ExactChildDto::class);
+        $mappingRegistry          = new MappingRegistry([$child]);
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mapperCache              = new MapperCache(
+            new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+            new PhpMapperGenerator(),
+            $this->cacheDirectory,
+            $valueTransformerRegistry,
+            true,
+            $mappingRegistry,
+            reusePreparedMappings: true,
+        );
+
+        $root = new MappingDefinition(ExactHolderSource::class, ExactHolderDto::class, [
+            'child' => MapRule::from('child')->nested(ExactChildDto::class),
+        ]);
+        $weakReference         = WeakReference::create($root);
+        $exactHolderSource     = new ExactHolderSource(new ExactChild('released'));
+        $weakSource            = WeakReference::create($exactHolderSource);
+        $result                = $mapperCache->map($root, $exactHolderSource);
+        $weakResult            = WeakReference::create($result);
+
+        unset($root, $exactHolderSource, $result);
+        gc_collect_cycles();
+
+        self::assertNull($weakReference->get());
+        self::assertNull($weakSource->get());
+        self::assertNull($weakResult->get());
+    }
+
     public function testItRejectsNestedAndCollectionSubclassValues(): void
     {
         $mapper = $this->mapper(
@@ -3818,6 +4002,71 @@ final class ObjectMapperTest extends TestCase
         );
     }
 
+    /** @return array{ObjectMapper, MapperCache, MappingMetadataFactory} */
+    private function fixedPreparedRuntime(MappingDefinition ...$definitions): array
+    {
+        $mappingRegistry          = new MappingRegistry($definitions);
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mappingMetadataFactory   = new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry);
+        $mapperCache              = new MapperCache(
+            $mappingMetadataFactory,
+            new PhpMapperGenerator(),
+            $this->cacheDirectory,
+            $valueTransformerRegistry,
+            true,
+            $mappingRegistry,
+            reusePreparedMappings: true,
+        );
+
+        return [new ObjectMapper($mappingRegistry, $mapperCache), $mapperCache, $mappingMetadataFactory];
+    }
+
+    private function mapperWithRegistry(MappingRegistryInterface $mappingRegistry): ObjectMapper
+    {
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+
+        return new ObjectMapper(
+            $mappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                true,
+                $mappingRegistry,
+                reusePreparedMappings: true,
+            ),
+        );
+    }
+
+    /** @param class-string $target */
+    private function assertMapRejected(ObjectMapper $objectMapper, object $source, string $target = ExactHolderDto::class): void
+    {
+        try {
+            $objectMapper->map($source, $target);
+            self::fail('Expected the swapped dependency to be rejected.');
+        } catch (MappingCompilationFailed) {
+            self::addToAssertionCount(1);
+        }
+    }
+
+    private function containsExecutionState(mixed $value): bool
+    {
+        if ($value instanceof MappingExecution || $value instanceof MappingExecutionFrame) {
+            return true;
+        }
+
+        if (is_array($value)) {
+            foreach ($value as $item) {
+                if ($this->containsExecutionState($item)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private function orderMapper(): ObjectMapper
     {
         return $this->mapper(
@@ -4745,4 +4994,30 @@ final class CollectionHelperCollisionDto
      * @param list<ExactChildDto> $Items
      */
     public function __construct(public array $items, public array $Items) {}
+}
+
+final class SwappableDependencyRegistry implements MappingRegistryInterface
+{
+    public ?MappingDefinitionInterface $replacement = null;
+
+    /** @param class-string $dependencySource @param class-string $dependencyTarget */
+    public function __construct(
+        private readonly MappingRegistryInterface $mappingRegistry,
+        private readonly string $dependencySource,
+        private readonly string $dependencyTarget,
+    ) {}
+
+    public function get(string $source, string $target): MappingDefinitionInterface
+    {
+        if ($this->replacement instanceof MappingDefinitionInterface && $source === $this->dependencySource && $target === $this->dependencyTarget) {
+            return $this->replacement;
+        }
+
+        return $this->mappingRegistry->get($source, $target);
+    }
+
+    public function all(): iterable
+    {
+        return $this->mappingRegistry->all();
+    }
 }

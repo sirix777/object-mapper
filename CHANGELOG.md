@@ -32,6 +32,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before the next parameter is processed. Nullable members are no longer read
   ahead of earlier parameters, so callback and failure ordering follows the
   target constructor parameter order.
+- With a fixed built-in `MappingRegistry` and `reusePreparedMappings: true`,
+  compiled structural scope tables are now reused between roots instead of being
+  rebuilt. Custom or wrapped `MappingRegistryInterface` registries keep
+  validating compiled bindings on every prepared root, so a swapped child
+  definition or source-match mode is still rejected. Only inert binding tables
+  are retained; no execution frame, source, or provenance is reused.
 - Generated-mapper cache format changed to `8`. Format-7 files are not reused.
   Deploy code and registrations, rotate the old owner-only cache, warm the new
   `0700` cache as its runtime owner before traffic, and restart or reload all

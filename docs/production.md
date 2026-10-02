@@ -126,6 +126,16 @@ mapped source, target, transformer, or registration code changes. Prepared
 entries are local to one worker and are not shared or synchronized. Custom and
 provider-custom mappings are not prepared by this option.
 
+For a **fixed built-in `MappingRegistry`** (not a third-party
+`MappingRegistryInterface` implementation), prepared mode also reuses the
+compiled structural scope tables of a definition between roots: the first
+structural root builds and validates the nested/collection bindings, and later
+roots reuse them without re-reading the registry. A custom or wrapped registry
+keeps validating its compiled bindings on every prepared root, so swapping a
+child definition or source-match mode is still rejected. Scope reuse stores only
+inert binding tables; it never retains a source, target result, execution frame,
+or provenance between roots.
+
 Do not create `MappingDefinition` objects from request/tenant/user input, and do
 not retain request state in definitions, transformers, or custom mappers.
 Distinct dynamic definitions can retain generated mappers for a worker lifetime.

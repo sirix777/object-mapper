@@ -24,6 +24,7 @@ use Sirix\ObjectMapper\Runtime\GeneratedMappingExecutionFailed;
 use Sirix\ObjectMapper\Runtime\MappingExecution;
 use Sirix\ObjectMapper\Runtime\MappingExecutionContext;
 use Sirix\ObjectMapper\Runtime\MappingExecutionFrame;
+use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapper\Runtime\NestedMappingRuntimeInterface;
 use Sirix\ObjectMapper\Runtime\SourceMatcher;
 use stdClass;
@@ -73,6 +74,7 @@ use function unlink;
  * @phpstan-type Dependency array{definition: CustomMappingDefinition|MappingDefinition|ProviderCustomMappingDefinition, mapper: GeneratedMapperInterface|null, hasStructuralMappings: bool}
  * @phpstan-type CollectionFailureDetails array{source: string, target: string, parameter: string, expected: string, elementTarget: class-string, sourceMatch: SourceMatchMode}
  * @phpstan-type PreparedMapping array{metadata: MappingMetadata, cacheKey: string, mapper: GeneratedMapperInterface, hasStructuralMappings: bool}
+ * @phpstan-type ScopeTable array<string, array{dependencies: array<string, Dependency>, collections: array<string, CollectionFailureDetails>}>
  */
 final class MapperCache implements NestedMappingRuntimeInterface, CollectionMappingRuntimeInterface
 {
@@ -89,6 +91,9 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
 
     /** @var WeakMap<MappingDefinition, PreparedMapping> */
     private readonly WeakMap $preparedMappings;
+
+    /** @var WeakMap<MappingDefinition, ScopeTable> */
+    private readonly WeakMap $preparedScopeTables;
 
     private readonly CustomMappingExecutor $customMappingExecutor;
 
@@ -111,6 +116,7 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         $this->mappingExecutionContext   = new MappingExecutionContext();
         $this->fiberExecutionContexts    = new WeakMap();
         $this->preparedMappings          = new WeakMap();
+        $this->preparedScopeTables       = new WeakMap();
         $this->customMappingExecutor     = $customMappingExecutor ?? new CustomMappingExecutor($customObjectMapperProvider);
     }
 
@@ -570,6 +576,10 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         MappingExecution $mappingExecution,
         ?MappingMetadata $mappingMetadata = null,
     ): MappingExecutionFrame {
+        if (! isset($mappingExecution->mappings[$mappingDefinition->key()])) {
+            $this->preloadScopeTable($mappingDefinition, $mappingExecution, $mappingMetadata);
+        }
+
         $mappings                 = $this->scopeMappings($mappingDefinition, $mappingExecution, $mappingMetadata);
         $mappingExecutionFrame    = new MappingExecutionFrame(
             $mappingExecutionContext->currentFrame,
@@ -581,6 +591,34 @@ final class MapperCache implements NestedMappingRuntimeInterface, CollectionMapp
         $mappingExecutionContext->currentFrame = $mappingExecutionFrame;
 
         return $mappingExecutionFrame;
+    }
+
+    private function preloadScopeTable(
+        MappingDefinition $mappingDefinition,
+        MappingExecution $mappingExecution,
+        ?MappingMetadata $mappingMetadata,
+    ): void {
+        if (! $this->reusePreparedMappings || ! $this->mappingRegistry instanceof MappingRegistry) {
+            return;
+        }
+
+        $scopeTable = $this->preparedScopeTables[$mappingDefinition] ??= $this->buildScopeTable($mappingDefinition, $mappingMetadata);
+        if ([] === $mappingExecution->mappings) {
+            $mappingExecution->mappings = $scopeTable;
+
+            return;
+        }
+
+        $mappingExecution->mappings = $scopeTable + $mappingExecution->mappings;
+    }
+
+    /** @return ScopeTable */
+    private function buildScopeTable(MappingDefinition $mappingDefinition, ?MappingMetadata $mappingMetadata): array
+    {
+        $mappingExecution = new MappingExecution();
+        $this->scopeMappings($mappingDefinition, $mappingExecution, $mappingMetadata);
+
+        return $mappingExecution->mappings;
     }
 
     private function exitMapping(MappingExecutionContext $mappingExecutionContext, MappingExecutionFrame $mappingExecutionFrame): void
