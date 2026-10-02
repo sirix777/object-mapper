@@ -781,4 +781,16 @@ final class StructuralMappingTest extends ObjectMapperIntegrationTestCase
         self::assertNull($weakSource->get());
         self::assertNull($weakReference->get());
     }
+
+    private function orderMapper(): ObjectMapper
+    {
+        return $this->mapper(
+            true,
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new MappingDefinition(ConstructorOrderSource::class, ConstructorOrderTarget::class, [
+                'child' => MapRule::fromGetter('getChild')->nested(ReleaseDto::class),
+                'items' => MapRule::fromGetter('getItems')->collection(Release::class, ReleaseDto::class),
+            ]),
+        );
+    }
 }

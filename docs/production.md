@@ -256,6 +256,37 @@ absolute values differ from the historical `0.9.0` table below because of the
 environment and iteration counts. Prepared mappings remain an order of magnitude
 faster than default revalidation.
 
+#### Error-path performance budget
+
+The expected-failure workload was **not** established as a regression, but it is
+also not proven neutral. The T8 comparison used a pre-T8 baseline worktree at
+commit `b04e453` selected with `--runtime-root`, alternating baseline/final, PHP
+8.5.10 CLI, OPcache on, JIT/PCOV/Xdebug off, nine rounds:
+
+```sh
+php -d pcov.enabled=0 -d opcache.enable_cli=1 -d opcache.jit=disable tools/benchmark.php \
+  --runtime-root=/path/to/b04e453 --workload=contexts --execution-context-mode=prepared \
+  --simple-iterations=20000 --nested-iterations=20000 --collection-iterations=2000 \
+  --context-iterations=10000 --fiber-iterations=5000 --rounds=9
+```
+
+The resulting prepared `failure` shape medians (ops/s) were `464,077` and
+`577,120` on the baseline versus `341,146` and `574,760` on the final source.
+The paired first runs differ by about −26% and the second runs are essentially
+equal, and the within-run round spread is large (`17.3–29.3 ms` medians across
+runs), which is why the difference cannot be attributed to a specific change. A
+separate micro-measurement showed the cost of constructing a new
+`MappingExecutionFailed` rising by about 27%, consistent with the additional
+optional constructor/reason field added for safe failure reasons. The raw JSON
+for these runs is not committed to the repository.
+
+This is an **accepted budget**: the failure path is not a hot path (it runs once
+per failed mapping, not per successful field), and the reason categories trade a
+small construction cost for safe, coarse diagnostics. Re-measure with pinned CPU
+and longer failure-only rounds, and profile the exception constructor, if an
+application treats mapping failures as a throughput-critical path. Do not read
+the successful-path prepared numbers as covering the error path.
+
 ### Historical 0.9.0 measurements
 
 The tables and figures in this section describe **release `0.9.0`** (generated

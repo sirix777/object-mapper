@@ -6,12 +6,16 @@ namespace Sirix\ObjectMapperTest\Integration;
 
 use DateTimeImmutable;
 use Fiber;
+use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionClass;
 use ReflectionMethod;
 use ReflectionProperty;
 use RuntimeException;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperProviderInterface;
+use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
+use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
 use Sirix\ObjectMapper\Definition\CustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\MappingDefinition;
 use Sirix\ObjectMapper\Definition\MapRule;
@@ -23,8 +27,10 @@ use Sirix\ObjectMapper\Exception\MappingFailureReason;
 use Sirix\ObjectMapper\Generator\MapperCache;
 use Sirix\ObjectMapper\Generator\PhpMapperGenerator;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
+use Sirix\ObjectMapper\Runtime\CustomMappingExecutor;
 use Sirix\ObjectMapper\Runtime\GeneratedMappingExecutionFailed;
 use Sirix\ObjectMapper\Runtime\MappingExecution;
+use Sirix\ObjectMapper\Runtime\MappingExecutionFrame;
 use Sirix\ObjectMapper\Runtime\MappingRegistry;
 use Sirix\ObjectMapper\Runtime\ObjectMapper;
 use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
@@ -33,6 +39,7 @@ use Sirix\ObjectMapperTest\Support\CallbackLeafDto;
 use Sirix\ObjectMapperTest\Support\CallbackLeafHolderDto;
 use Sirix\ObjectMapperTest\Support\CallbackLeafHolderSource;
 use Sirix\ObjectMapperTest\Support\CallbackLeafSource;
+use Sirix\ObjectMapperTest\Support\CallbackLeafTransformer;
 use Sirix\ObjectMapperTest\Support\CallbackRelease;
 use Sirix\ObjectMapperTest\Support\CollectionExecutionTrace;
 use Sirix\ObjectMapperTest\Support\ConstantSource;
@@ -90,6 +97,7 @@ use function gc_collect_cycles;
 use function glob;
 use function hash;
 use function in_array;
+use function is_array;
 use function is_dir;
 use function json_encode;
 use function mkdir;
@@ -409,6 +417,16 @@ final class PreparedMappingTest extends ObjectMapperIntegrationTestCase
             self::assertNull($weakFiber->get());
             self::assertNull($weakLeaf->get());
             self::assertNull($weakSource->get());
+        }
+    }
+
+    /** @return iterable<string, array{bool, string}> */
+    public static function suspendedNestedLeafCallbackModes(): iterable
+    {
+        foreach (self::collectionCacheModes() as $mode => [$prepared]) {
+            foreach (['getter', 'transformer'] as $callback) {
+                yield $mode . '-' . $callback => [$prepared, $callback];
+            }
         }
     }
 
@@ -971,6 +989,16 @@ final class PreparedMappingTest extends ObjectMapperIntegrationTestCase
         self::assertSame('recovered', $mapper->map(new CallbackLeafSource(static fn (): string => 'recovered'), $target)->version);
     }
 
+    /** @return iterable<string, array{bool, string, bool, bool}> */
+    public static function leafReplayModes(): iterable
+    {
+        foreach (self::leafReentryModes() as $name => [$prepared, $callback, $nested]) {
+            foreach ([true, false] as $consume) {
+                yield $name . ($consume ? '-consumed' : '-unconsumed') => [$prepared, $callback, $nested, $consume];
+            }
+        }
+    }
+
     #[DataProvider('collectionCacheModes')]
     public function testCollectionLeafRejectsUnconsumedParentGeneratedFailure(bool $reusePreparedMappings): void
     {
@@ -1060,5 +1088,199 @@ final class PreparedMappingTest extends ObjectMapperIntegrationTestCase
             $recovered = $this->leafCallbackParent($mapper, new CallbackLeafSource(static fn (): string => 'leaf'), $target, $nested);
             self::assertEquals([new ReleaseDto('sibling')], $mapper->map($recovered, CallbackLeafHolderDto::class)->releases);
         }
+    }
+
+    /** @return iterable<string, array{bool, string, bool}> */
+    public static function leafReentryModes(): iterable
+    {
+        foreach (self::collectionCacheModes() as $mode => [$prepared]) {
+            foreach (['getter', 'transformer', 'constructor'] as $callback) {
+                foreach ([false, true] as $nested) {
+                    yield $mode . '-' . $callback . ($nested ? '-nested' : '-root') => [$prepared, $callback, $nested];
+                }
+            }
+        }
+    }
+
+    /** @param class-string<CallbackLeafDto> $target */
+    private function leafCallbackParent(ObjectMapper $objectMapper, CallbackLeafSource $callbackLeafSource, string $target, bool $nested): CallbackLeafHolderSource
+    {
+        return new CallbackLeafHolderSource($nested ? $callbackLeafSource : null, [new Release('sibling')], $nested ? null : static function() use ($objectMapper, $callbackLeafSource, $target): void {
+            self::assertSame('leaf', $objectMapper->map($callbackLeafSource, $target)->version);
+        });
+    }
+
+    /** @return array{ObjectMapper, MapperCache, class-string<CallbackLeafDto>} */
+    private function leafCallbackRuntime(bool $prepared, string $callbackKind): array
+    {
+        $target                   = CallbackLeafDto::class;
+        $valueTransformerRegistry = new ValueTransformerRegistry([new CallbackLeafTransformer()]);
+        $mappingRegistry          = new MappingRegistry([
+            new MappingDefinition(CallbackLeafSource::class, $target, [
+                'version' => match ($callbackKind) {
+                    'getter'      => MapRule::fromGetter('getVersion'),
+                    'transformer' => MapRule::fromGetter('getCallback')->through(CallbackLeafTransformer::class),
+                    'constructor' => MapRule::fromGetter('getCallback'),
+                    default       => throw new InvalidArgumentException('Unknown leaf callback kind: ' . $callbackKind),
+                },
+            ]),
+            new MappingDefinition(Release::class, ReleaseDto::class),
+            new MappingDefinition(CallbackLeafHolderSource::class, CallbackLeafHolderDto::class, [
+                'leaf'     => MapRule::fromGetter('getLeaf')->nested($target),
+                'releases' => MapRule::fromGetter('getReleases')->collection(Release::class, ReleaseDto::class),
+            ]),
+            new MappingDefinition(FiberCollectionFailureSource::class, FiberCollectionFailureDto::class, [
+                'releases' => MapRule::fromGetter('getReleases')->collection(Release::class, ReleaseDto::class),
+            ]),
+        ]);
+        $mapperCache = new MapperCache(
+            new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+            new PhpMapperGenerator(), $this->cacheDirectory, $valueTransformerRegistry,
+            generateOnDemand: true, mappingRegistry: $mappingRegistry, reusePreparedMappings: $prepared,
+        );
+
+        return [new ObjectMapper($mappingRegistry, $mapperCache), $mapperCache, $target];
+    }
+
+    /** @return array{ObjectMapper, MapperCache, MappingMetadataFactory} */
+    private function fixedPreparedRuntime(MappingDefinition ...$definitions): array
+    {
+        $mappingRegistry          = new MappingRegistry($definitions);
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mappingMetadataFactory   = new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry);
+        $mapperCache              = new MapperCache(
+            $mappingMetadataFactory,
+            new PhpMapperGenerator(),
+            $this->cacheDirectory,
+            $valueTransformerRegistry,
+            true,
+            $mappingRegistry,
+            reusePreparedMappings: true,
+        );
+
+        return [new ObjectMapper($mappingRegistry, $mapperCache), $mapperCache, $mappingMetadataFactory];
+    }
+
+    private function mapperWithRegistry(MappingRegistryInterface $mappingRegistry): ObjectMapper
+    {
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+
+        return new ObjectMapper(
+            $mappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                true,
+                $mappingRegistry,
+                reusePreparedMappings: true,
+            ),
+        );
+    }
+
+    /** @param class-string $target */
+    private function assertMapRejected(ObjectMapper $objectMapper, object $source, string $target = ExactHolderDto::class): void
+    {
+        try {
+            $objectMapper->map($source, $target);
+            self::fail('Expected the swapped dependency to be rejected.');
+        } catch (MappingCompilationFailed) {
+            self::addToAssertionCount(1);
+        }
+    }
+
+    private function containsExecutionState(mixed $value): bool
+    {
+        if ($value instanceof MappingExecution || $value instanceof MappingExecutionFrame) {
+            return true;
+        }
+
+        if (is_array($value)) {
+            foreach ($value as $item) {
+                if ($this->containsExecutionState($item)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private function mapperWithPreparedCache(
+        bool $generateOnDemand,
+        bool $reusePreparedMappings,
+        MappingDefinitionInterface ...$definitions,
+    ): ObjectMapper {
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mappingRegistry          = new MappingRegistry($definitions);
+
+        return new ObjectMapper(
+            $mappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                $generateOnDemand,
+                $mappingRegistry,
+                reusePreparedMappings: $reusePreparedMappings,
+            ),
+        );
+    }
+
+    /**
+     * @return array{ObjectMapper, CountingValueTransformerRegistry}
+     */
+    private function mapperWithCountingTransformer(bool $reusePreparedMappings): array
+    {
+        $mappingDefinition = new MappingDefinition(ConventionalSource::class, ConventionalTarget::class, [
+            'name' => MapRule::from('name')->through(PreparedCacheCountingTransformer::class),
+        ]);
+        $mappingRegistry                  = new MappingRegistry([$mappingDefinition]);
+        $countingValueTransformerRegistry = new CountingValueTransformerRegistry(new PreparedCacheCountingTransformer());
+
+        return [
+            new ObjectMapper(
+                $mappingRegistry,
+                new MapperCache(
+                    new MappingMetadataFactory($countingValueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                    new PhpMapperGenerator(),
+                    $this->cacheDirectory,
+                    $countingValueTransformerRegistry,
+                    false,
+                    $mappingRegistry,
+                    reusePreparedMappings: $reusePreparedMappings,
+                ),
+            ),
+            $countingValueTransformerRegistry,
+        ];
+    }
+
+    private function mapperWithPreparedCacheAndProvider(
+        bool $generateOnDemand,
+        CustomObjectMapperProviderInterface $customObjectMapperProvider,
+        MappingDefinitionInterface ...$definitions,
+    ): ObjectMapper {
+        $valueTransformerRegistry = new ValueTransformerRegistry();
+        $mappingRegistry          = new MappingRegistry($definitions);
+        $customMappingExecutor    = new CustomMappingExecutor($customObjectMapperProvider);
+
+        return new ObjectMapper(
+            $mappingRegistry,
+            new MapperCache(
+                new MappingMetadataFactory($valueTransformerRegistry, mappingRegistry: $mappingRegistry),
+                new PhpMapperGenerator(),
+                $this->cacheDirectory,
+                $valueTransformerRegistry,
+                $generateOnDemand,
+                $mappingRegistry,
+                $customObjectMapperProvider,
+                $customMappingExecutor,
+                true,
+            ),
+            $customObjectMapperProvider,
+            $customMappingExecutor,
+        );
     }
 }

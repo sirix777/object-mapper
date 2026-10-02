@@ -68,6 +68,8 @@ use Sirix\ObjectMapperTest\Support\VirtualGetOnlySource;
 use Sirix\ObjectMapperTest\Support\VirtualGetSetSource;
 
 use function bin2hex;
+use function class_alias;
+use function class_exists;
 use function fileperms;
 use function glob;
 use function random_bytes;
@@ -529,6 +531,20 @@ final class ObjectMapperTest extends ObjectMapperIntegrationTestCase
             self::fail('Expected a replaced transitive runtime dependency to fail.');
         } catch (MappingCompilationFailed $exception) {
             self::assertSame('Nested mapping dependency does not match its compiled definition.', $exception->getMessage());
+        }
+    }
+
+    /**
+     * @param class-string $class
+     *
+     * @phpstan-assert class-string $alias
+     */
+    private function registerClassAlias(string $class, string $alias): void
+    {
+        class_alias($class, $alias);
+
+        if (! class_exists($alias)) {
+            self::fail('Could not register integration test class alias.');
         }
     }
 }

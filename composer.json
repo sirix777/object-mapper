@@ -34,7 +34,7 @@
         }
     },
     "scripts": {
-        "analyse-deps": "tools/composer-dependency-analyser/vendor/bin/composer-dependency-analyser",
+        "analyse-deps": "tools/composer-dependency-analyser/vendor/bin/composer-dependency-analyser --config tools/composer-dependency-analyser/config.php",
         "check": [
             "@cs-check",
             "@rector",
