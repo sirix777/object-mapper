@@ -94,8 +94,9 @@ final class MapperWarmupTest extends ObjectMapperIntegrationTestCase
             DefaultSource::class . '->' . DefaultTarget::class,
         ];
 
-        self::assertSame($expected, $mapper->warmup());
-        self::assertSame($expected, $mapper->warmup());
+        $firstWarmup = $mapper->warmup();
+        self::assertSame($expected, $firstWarmup);
+        self::assertSame($firstWarmup, $mapper->warmup());
         self::assertCount(2, glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
     }
 
