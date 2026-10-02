@@ -5,3 +5,4 @@
 /data/cache/object-mapper/*
 !/data/cache/object-mapper/.gitkeep
 .idea
+composer.lock
