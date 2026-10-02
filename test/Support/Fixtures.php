@@ -1039,6 +1039,16 @@ final class TwoCycleDtoB
     public function __construct(public TwoCycleDtoA $child) {}
 }
 
+final readonly class TwoNestedSource
+{
+    public function __construct(public AccessToken $token, public AccessToken $other) {}
+}
+
+final readonly class TwoNestedDto
+{
+    public function __construct(public ApiAccessTokenDto $token, public NameTarget $other) {}
+}
+
 final class ByReferenceTargetSource
 {
     public int $value = 1;

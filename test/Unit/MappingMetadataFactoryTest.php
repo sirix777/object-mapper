@@ -9,6 +9,8 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RequiresPhp;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
+use Sirix\ObjectMapper\Contract\CustomObjectMapperInterface;
 use Sirix\ObjectMapper\Contract\MappingDefinitionInterface;
 use Sirix\ObjectMapper\Contract\MappingRegistryInterface;
 use Sirix\ObjectMapper\Contract\ValueTransformerInterface;
@@ -18,6 +20,7 @@ use Sirix\ObjectMapper\Definition\MapRule;
 use Sirix\ObjectMapper\Definition\ProviderCustomMappingDefinition;
 use Sirix\ObjectMapper\Definition\SourceMatchMode;
 use Sirix\ObjectMapper\Exception\MappingCompilationFailed;
+use Sirix\ObjectMapper\Exception\MappingNotRegistered;
 use Sirix\ObjectMapper\Metadata\MappingMetadata;
 use Sirix\ObjectMapper\Metadata\MappingMetadataFactory;
 use Sirix\ObjectMapper\Metadata\NestedMappingMetadata;
@@ -113,6 +116,8 @@ use Sirix\ObjectMapperTest\Support\TwoCycleDtoA;
 use Sirix\ObjectMapperTest\Support\TwoCycleDtoB;
 use Sirix\ObjectMapperTest\Support\TwoCycleSourceA;
 use Sirix\ObjectMapperTest\Support\TwoCycleSourceB;
+use Sirix\ObjectMapperTest\Support\TwoNestedDto;
+use Sirix\ObjectMapperTest\Support\TwoNestedSource;
 use Sirix\ObjectMapperTest\Support\UnionConstantTarget;
 use Sirix\ObjectMapperTest\Support\UnionTypedTokenHolderSource;
 use Sirix\ObjectMapperTest\Support\UntypedConstantTarget;
@@ -132,8 +137,12 @@ use Sirix\ObjectMapperTest\Support\WrongTypedTokenHolderSource;
 
 use Sirix\ObjectMapperTest\Support\ZeroArgumentTransformTransformer;
 
+use Throwable;
+use WeakReference;
+
 use function array_map;
 use function count;
+use function gc_collect_cycles;
 use function hash;
 use function hash_file;
 use function json_encode;
@@ -1059,6 +1068,150 @@ final class MappingMetadataFactoryTest extends TestCase
         self::assertIsString($firstFingerprint);
         self::assertIsString($secondFingerprint);
         self::assertNotSame($firstFingerprint, $secondFingerprint);
+    }
+
+    public function testItReleasesCompilationTemporariesAfterSuccessAndFailure(): void
+    {
+        $registry = new class implements MappingRegistryInterface {
+            /** @var null|WeakReference<MappingDefinitionInterface> */
+            public ?WeakReference $lastDependency = null;
+
+            public int $calls = 0;
+
+            public function get(string $source, string $target): MappingDefinitionInterface
+            {
+                ++$this->calls;
+                if ($this->calls > 1) {
+                    throw new MappingNotRegistered($source, $target);
+                }
+
+                $mappingDefinition           = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class);
+                $this->lastDependency        = WeakReference::create($mappingDefinition);
+
+                return $mappingDefinition;
+            }
+
+            public function all(): iterable
+            {
+                return [];
+            }
+        };
+        $mappingMetadataFactory = new MappingMetadataFactory(new ValueTransformerRegistry(), mappingRegistry: $registry);
+        $parent                 = new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+
+        $mappingMetadata = $mappingMetadataFactory->create($parent);
+        self::assertInstanceOf(WeakReference::class, $registry->lastDependency);
+        unset($mappingMetadata);
+        gc_collect_cycles();
+        self::assertNotNull($registry->lastDependency);
+        self::assertNull($registry->lastDependency->get(), 'Factory retained a temporary dependency after a successful compilation.');
+
+        $registry->calls          = 0;
+        $registry->lastDependency = null;
+        $failingParent            = new MappingDefinition(TwoNestedSource::class, TwoNestedDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+            'other' => MapRule::from('other')->nested(NameTarget::class),
+        ]);
+
+        try {
+            $mappingMetadataFactory->create($failingParent);
+            self::fail('Expected the second nested dependency to fail.');
+        } catch (MappingCompilationFailed) {
+            self::addToAssertionCount(1);
+        }
+
+        unset($failingParent);
+        gc_collect_cycles();
+        self::assertNotNull($registry->lastDependency);
+        self::assertNull($registry->lastDependency->get(), 'Factory retained a temporary dependency after a failed compilation.');
+    }
+
+    public function testItRecoversWhenCompilationCleanupThrows(): void
+    {
+        $registry = new class implements MappingRegistryInterface {
+            public int $calls = 0;
+
+            private bool $poisoned = true;
+
+            public function get(string $source, string $target): MappingDefinitionInterface
+            {
+                ++$this->calls;
+                if ($this->poisoned) {
+                    $this->poisoned = false;
+                    $mapper         = new class implements CustomObjectMapperInterface {
+                        public function map(object $source): object
+                        {
+                            return new ApiAccessTokenDto('');
+                        }
+
+                        public function __destruct()
+                        {
+                            throw new RuntimeException('destructor boom');
+                        }
+                    };
+
+                    return new CustomMappingDefinition(AccessToken::class, ApiAccessTokenDto::class, $mapper);
+                }
+
+                return new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class);
+            }
+
+            public function all(): iterable
+            {
+                return [];
+            }
+        };
+        $mappingMetadataFactory = new MappingMetadataFactory(new ValueTransformerRegistry(), mappingRegistry: $registry);
+        $failingParent          = new MappingDefinition(TwoNestedSource::class, TwoNestedDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+            'other' => MapRule::from('other')->nested(NameTarget::class),
+        ]);
+
+        try {
+            $mappingMetadataFactory->create($failingParent);
+            self::fail('Expected the first compilation to fail.');
+        } catch (Throwable $throwable) {
+            self::assertSame('destructor boom', $throwable->getMessage());
+        }
+
+        $recoveryParent = new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+
+        self::assertInstanceOf(MappingMetadata::class, $mappingMetadataFactory->create($recoveryParent));
+    }
+
+    public function testReturnedMetadataKeepsItsCompiledDependencySnapshot(): void
+    {
+        $child                  = new MappingDefinition(AccessToken::class, ApiAccessTokenDto::class);
+        $mappingMetadataFactory = new MappingMetadataFactory(
+            new ValueTransformerRegistry(),
+            mappingRegistry: new MappingRegistry([$child]),
+        );
+        $parent = new MappingDefinition(TokenHolderSource::class, TokenHolderDto::class, [
+            'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+        ]);
+
+        $mappingMetadata = $mappingMetadataFactory->create($parent);
+        $nested          = $mappingMetadata->parameters[0]->nestedMapping;
+        self::assertInstanceOf(NestedMappingMetadata::class, $nested);
+
+        $mappingMetadataFactory->create(new MappingDefinition(
+            NullableTokenHolderSource::class,
+            NullableTokenHolderDto::class,
+            [
+                'token' => MapRule::from('token')->nested(ApiAccessTokenDto::class),
+            ],
+        ));
+
+        self::assertTrue($mappingMetadataFactory->matchesCompiledDependency($mappingMetadata, $nested, $child));
+        self::assertSame($child, $mappingMetadataFactory->compiledConventionalDependency($mappingMetadata, $nested));
+        self::assertInstanceOf(
+            MappingMetadata::class,
+            $mappingMetadataFactory->compiledDependencyMetadata($mappingMetadata, $nested),
+        );
     }
 
     public function testItIncludesTypeTaggedConstantsInNestedDependencyFingerprints(): void

@@ -105,17 +105,7 @@ final class MappingMetadataFactory
         $compilation             = new stdClass();
         $this->activeCompilation = $compilation;
 
-        // Fingerprints are valid only for one dependency traversal. A registry may
-        // deliberately provide different definitions between separate compilations.
         try {
-            $this->dependencyStack        = [];
-            $this->dependencyFingerprints = [];
-            $this->dependencyDefinitions  = [];
-            $this->compiledMetadata       = [];
-            $this->compilingMetadata      = [];
-            $this->dependencyBindings     = new WeakMap();
-            $this->dependencyMetadata     = new WeakMap();
-
             return $this->compile($mappingDefinition);
         } catch (MappingCompilationFailed $mappingCompilationFailed) {
             $this->trustedCompilationFailures[$mappingCompilationFailed] ??= [
@@ -126,7 +116,11 @@ final class MappingMetadataFactory
             throw $mappingCompilationFailed;
         } finally {
             if ($this->activeCompilation === $compilation) {
-                $this->activeCompilation = null;
+                try {
+                    $this->releaseCompilationState();
+                } finally {
+                    $this->activeCompilation = null;
+                }
             }
         }
     }
@@ -186,6 +180,34 @@ final class MappingMetadataFactory
         }
 
         return $this->trustedCompilationFailures[$throwable]['cycle'] ?? null;
+    }
+
+    private function releaseCompilationState(): void
+    {
+        // Fingerprints are valid only for one dependency traversal. A registry may
+        // deliberately provide different definitions between separate compilations.
+        // Returned snapshots keep the WeakMap instances they need; the factory does
+        // not retain the last compilation through its temporary arrays.
+        //
+        // Released objects can run destructors that throw. Capture the last strong
+        // references first, clear every field, and only then drop them, so a
+        // throwing destructor cannot leave a half-cleared factory.
+        $temporaries = [
+            $this->dependencyDefinitions,
+            $this->compiledMetadata,
+            $this->dependencyBindings,
+            $this->dependencyMetadata,
+        ];
+
+        $this->dependencyStack        = [];
+        $this->dependencyFingerprints = [];
+        $this->dependencyDefinitions  = [];
+        $this->compiledMetadata       = [];
+        $this->compilingMetadata      = [];
+        $this->dependencyBindings     = new WeakMap();
+        $this->dependencyMetadata     = new WeakMap();
+
+        unset($temporaries);
     }
 
     /** @return null|array{bindings: WeakMap<NestedMappingMetadata, MappingDefinitionInterface>, metadata: WeakMap<NestedMappingMetadata, MappingMetadata>} */
