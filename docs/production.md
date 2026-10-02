@@ -339,7 +339,7 @@ preparation failures, failure provenance, and weak-reference cleanup.
 
 ## Upgrading generated cache to format 8
 
-The next release changes generated-mapper cache format from `7` to `8`.
+Release `0.10.0` changes generated-mapper cache format from `7` to `8`.
 Format-7 files are not reused. Deploy the application code and trusted
 registrations, rotate to a fresh owner-only (`0700`) cache directory, and warm
 it as the runtime owner before serving traffic. Generated files remain `0600`.

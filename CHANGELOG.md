@@ -4,7 +4,21 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] - 2026-10-02
+
+### Upgrade requirements
+
+- **Generated-mapper cache format is `8`.** Format-7 files are not reused. On
+  upgrade, publish the application code and trusted registrations, rotate to a
+  fresh owner-only (`0700`) cache directory, and warm it as the runtime owner
+  **before serving traffic**. Generated files remain `0600`.
+- **Restart or reload every long-running PHP worker** (including workers using
+  prepared-mapping reuse) so they load the new runtime and generated mappers. Do
+  not mix an older runtime with newly generated format-8 code.
+- Conventional mappings now evaluate constructor arguments in constructor order,
+  which can change the observable order of source getter, transformer, nested
+  and collection callbacks. Review any mapping that relies on the previous
+  hoisted source-read order.
 
 ### Added
 
