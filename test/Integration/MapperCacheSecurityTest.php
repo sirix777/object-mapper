@@ -19,6 +19,7 @@ use Sirix\ObjectMapper\Runtime\ValueTransformerRegistry;
 use Sirix\ObjectMapperTest\Support\ConventionalSource;
 use Sirix\ObjectMapperTest\Support\ConventionalTarget;
 
+use function array_unique;
 use function bin2hex;
 use function chmod;
 use function clearstatcache;
@@ -29,6 +30,7 @@ use function file_put_contents;
 use function fileperms;
 use function function_exists;
 use function glob;
+use function implode;
 use function is_dir;
 use function is_file;
 use function is_link;
@@ -253,10 +255,11 @@ final class MapperCacheSecurityTest extends TestCase
                 $outputs[$index] = trim($stdout);
             }
 
-            self::assertSame($outputs[0], $outputs[1]);
+            $unique = array_unique($outputs);
+            self::assertCount(1, $unique);
             self::assertSame([
                 'id' => 7,
-            ], json_decode($outputs[0], true, flags: JSON_THROW_ON_ERROR));
+            ], json_decode(implode('', $unique), true, flags: JSON_THROW_ON_ERROR));
 
             $generatedFiles = glob($this->cacheDirectory . '/Mapper_*.php') ?: [];
             self::assertCount(1, $generatedFiles);

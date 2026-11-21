@@ -234,7 +234,7 @@ final class MappingMetadataFactory
             $target      = new ReflectionClass($mappingDefinition->target);
             $constructor = $target->getConstructor();
 
-            if (null === $constructor || ! $constructor->isPublic()) {
+            if (! $constructor instanceof ReflectionMethod || ! $constructor->isPublic()) {
                 throw new MappingCompilationFailed(sprintf(
                     'Target class %s must have a public constructor.',
                     $target->getName(),
@@ -1150,7 +1150,7 @@ final class MappingMetadataFactory
     private function isBooleanParameter(ReflectionParameter $reflectionParameter): bool
     {
         $type = $reflectionParameter->getType();
-        if (null === $type) {
+        if (! $type instanceof ReflectionType) {
             return false;
         }
 

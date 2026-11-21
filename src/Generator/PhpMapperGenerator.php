@@ -20,7 +20,7 @@ use function sprintf;
 /** @internal */
 final class PhpMapperGenerator
 {
-    private const FORMAT_VERSION = '8';
+    private const string FORMAT_VERSION = '8';
 
     public function cacheKey(MappingMetadata $mappingMetadata): string
     {
@@ -249,7 +249,7 @@ final class PhpMapperGenerator
                     'sourceMatch'           => $parameter->nestedMapping->sourceMatch->name,
                     'dependencyFingerprint' => $parameter->nestedMapping->dependencyFingerprint,
                 ],
-                'constant'      => null === $parameter->constant ? null : $parameter->constant->identity(),
+                'constant'      => $parameter->constant?->identity(),
             ];
         }
 

@@ -397,7 +397,7 @@ final class MappingMetadataFactoryTest extends TestCase
         self::assertNull($mappingMetadataFactory->trustedCompilationFailureMessage($mappingCompilationFailed));
     }
 
-    #[RequiresPhp('>= 8.4')]
+    #[RequiresPhp('>= 8.4.0')]
     public function testItRejectsVirtualSetOnlySourceProperties(): void
     {
         try {
@@ -418,7 +418,7 @@ final class MappingMetadataFactoryTest extends TestCase
         }
     }
 
-    #[RequiresPhp('>= 8.4')]
+    #[RequiresPhp('>= 8.4.0')]
     public function testItFallsBackToGetterWhenConventionalPropertyIsUnreadable(): void
     {
         $mappingMetadata = $this->mappingMetadataFactory->create(new MappingDefinition(

@@ -22,21 +22,21 @@ use function strlen;
 
 final readonly class MapRule
 {
-    private const PROPERTY = 'property';
+    private const string PROPERTY = 'property';
 
-    private const GETTER = 'getter';
+    private const string GETTER = 'getter';
 
-    private const METHOD = 'method';
+    private const string METHOD = 'method';
 
-    private const CONSTANT = 'constant';
+    private const string CONSTANT = 'constant';
 
-    private const DIRECT = 'direct';
+    private const string DIRECT = 'direct';
 
-    private const TRANSFORM = 'transform';
+    private const string TRANSFORM = 'transform';
 
-    private const NESTED = 'nested';
+    private const string NESTED = 'nested';
 
-    private const COLLECTION = 'collection';
+    private const string COLLECTION = 'collection';
 
     /**
      * @param null|class-string<ValueTransformerInterface>          $transformer
