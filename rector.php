@@ -28,6 +28,6 @@ return static function(RectorConfig $rectorConfig): void {
         SetList::PRIVATIZATION,
         SetList::DEAD_CODE,
         SetList::EARLY_RETURN,
-        LevelSetList::UP_TO_PHP_82,
+        LevelSetList::UP_TO_PHP_83,
     ]);
 };

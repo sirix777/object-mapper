@@ -326,8 +326,8 @@ final class CustomMappingTest extends ObjectMapperIntegrationTestCase
         $sensitiveDetail = 'sensitive provider failure';
         $definitions     = [new ProviderCustomMappingDefinition(CustomChildSource::class, CustomChildDto::class, $mapperId)];
         $providers       = [
-            new class($sensitiveDetail) implements CustomObjectMapperProviderInterface {
-                public function __construct(private readonly string $sensitiveDetail) {}
+            new readonly class($sensitiveDetail) implements CustomObjectMapperProviderInterface {
+                public function __construct(private string $sensitiveDetail) {}
 
                 public function get(string $mapperId): CustomObjectMapperInterface
                 {
@@ -335,8 +335,8 @@ final class CustomMappingTest extends ObjectMapperIntegrationTestCase
                 }
             },
             new RecordingCustomMapperProvider([
-                $mapperId => new class($sensitiveDetail) implements CustomObjectMapperInterface {
-                    public function __construct(private readonly string $sensitiveDetail) {}
+                $mapperId => new readonly class($sensitiveDetail) implements CustomObjectMapperInterface {
+                    public function __construct(private string $sensitiveDetail) {}
 
                     public function map(object $source): object
                     {
@@ -419,8 +419,8 @@ final class CustomMappingTest extends ObjectMapperIntegrationTestCase
         $objectMapper    = $this->mapperWithProvider(
             true,
             new RecordingCustomMapperProvider([
-                $mapperId => new class($sensitiveDetail) implements CustomObjectMapperInterface {
-                    public function __construct(private readonly string $sensitiveDetail) {}
+                $mapperId => new readonly class($sensitiveDetail) implements CustomObjectMapperInterface {
+                    public function __construct(private string $sensitiveDetail) {}
 
                     public function map(object $source): object
                     {

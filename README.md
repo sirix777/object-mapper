@@ -13,7 +13,7 @@ constructor.
 composer require sirix/object-mapper
 ```
 
-The package requires PHP 8.2 or later and has no production dependencies.
+The package requires PHP 8.3 or later and has no production dependencies.
 
 ## Register and map a pair
 
