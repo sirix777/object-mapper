@@ -3,8 +3,6 @@
 declare(strict_types=1);
 
 use Rector\Config\RectorConfig;
-use Rector\Naming\Rector\Class_\RenamePropertyToMatchTypeRector;
-use Rector\Naming\Rector\ClassMethod\RenameParamToMatchTypeRector;
 use Rector\Set\ValueObject\LevelSetList;
 use Rector\Set\ValueObject\SetList;
 
@@ -14,12 +12,6 @@ return static function(RectorConfig $rectorConfig): void {
     $rectorConfig->paths([
         __DIR__ . '/src',
         __DIR__ . '/test',
-    ]);
-
-    // "reason" is the documented public constructor parameter and accessor name.
-    $rectorConfig->skip([
-        RenameParamToMatchTypeRector::class    => [__DIR__ . '/src/Exception/MappingExecutionFailed.php'],
-        RenamePropertyToMatchTypeRector::class => [__DIR__ . '/src/Exception/MappingExecutionFailed.php'],
     ]);
 
     $rectorConfig->sets([
