@@ -21,6 +21,11 @@
         </testsuite>
     </testsuites>
 
+    <php>
+        <!-- Production default; without a php.ini exception traces keep argument references alive and break retention tests. -->
+        <ini name="zend.exception_ignore_args" value="1"/>
+    </php>
+
     <source>
         <include>
             <directory suffix=".php">src</directory>
