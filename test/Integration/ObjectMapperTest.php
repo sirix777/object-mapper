@@ -130,7 +130,7 @@ final class ObjectMapperTest extends ObjectMapperIntegrationTestCase
         self::assertSame([], glob($this->cacheDirectory . '/Mapper_*.php') ?: []);
     }
 
-    #[RequiresPhp('>= 8.4')]
+    #[RequiresPhp('>= 8.4.0')]
     public function testItMapsReadableHookedProperties(): void
     {
         VirtualGetSetSource::$reads  = 0;
@@ -144,7 +144,7 @@ final class ObjectMapperTest extends ObjectMapperIntegrationTestCase
         self::assertSame(42, $getOnlyMapper->map(new VirtualGetOnlySource(), HookValueTarget::class)->value);
     }
 
-    #[RequiresPhp('>= 8.4')]
+    #[RequiresPhp('>= 8.4.0')]
     public function testItKeepsBackedSetOnlyPropertiesReadable(): void
     {
         $mapper                     = $this->mapper(true, new MappingDefinition(BackedSetOnlySource::class, HookValueTarget::class));
